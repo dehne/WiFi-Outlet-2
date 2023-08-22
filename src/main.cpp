@@ -1,6 +1,6 @@
 /****
  * @file main.cpp
- * @version 0.1.0
+ * @version 0.2.0
  * 
  * WiFi Outlet -- Replacement firmware for the 2017 Sharper Image model 70011 WiFi 
  * controlled outlet. 
@@ -101,7 +101,7 @@
 #define RELAY           (14)                        // On the WiFi outlet PCB, the relay that controls the outlet
 
 // Misc constants
-#define BANNER              "WiFi Switch V0.1.0"    // The tagline to identify this sketch
+#define BANNER              "WiFi Switch V0.2.0"    // The tagline to identify this sketch
 #define TOGGLE_QUERY        "outlet=toggle"         // The URI query string to cause the outlet to toggle state
 #define LED_LIT             (LOW)                   // digitalWrite value to light the LED
 #define LED_DARK            (HIGH)                  // digitalWrite value to turn the LED off
@@ -125,21 +125,15 @@ UserInput ui {};
 eepromData_t config {0, "", ""};
 bool running;
 
-// The HTML for the device's "home page"
-const char* homePage  = "<!DOCTYPE html>\n"
-                        "<html>\n"
-                        "  <head>\n"
-                        "    <meta charset=\"utf-8\" />\n"
-                        "  </head>\n"
-                        "  <body>\n"
-                        "    <h1>" BANNER "</h1>\n"
-                        "    <p>Click the button to toggle the state of the outlet.</p>\n"
-                        "    <form>\n"
-                        "      <input type=\"submit\" value=\"Toggle Outlet\" formaction=\"/?" TOGGLE_QUERY "\""
-                        "        formmethod=\"post\"/>\n"
-                        "    </form>\n"
-                        "  </body>\n"
-                        "</html>\n\r\n";
+/**
+ * @brief Return the state of the outlet.
+ * 
+ * @return true     The outlet is turned on
+ * @return false    The outlet is turned off
+ */
+bool outletIsOn() {
+    return digitalRead(RELAY) == RELAY_CLOSED;
+}
 
 /**
  * @brief Invert the state of the outlet. I.e., if it was on, turn it (and the LED) off and vice versa.
@@ -153,56 +147,76 @@ void toggleOutlet() {
 }
 
 /**
- * @brief   HTTP GET and HEAD method handler for webServer. Return the complete message for the 
- *          request -- headers and, if applicable, content -- that is the response to a GET (or 
- *          HEAD) request for the specified trPath and trQuery.
+ * @brief Assemble the current state of our home page and send it to the httpClient.
  * 
- * @param webServer         The SimpleWebServer for which we're acting as the GET and HEAD handlers
- * @param trPath            The path portion of the URI of the resource being requested
- * @param trQuery           The trQuery (if any)
- * @return String           The message to be sent to the client
+ * @param httpClient    The HTTP client we are to send the assembled home page to.
  */
-String handleGetAndHead(SimpleWebServer* webServer, String trPath, String trQuery) {
-    // Assume the response message starts with the usual response headers
-    String message = swsNormalResponseHeaders;
-
-    // We only have a "home page." If that's what was asked for, proceed
-    if (trPath.equals("/") || trPath.equals("/index.html") || trPath.equals("index.htm")) {
-        // If this is a GET request, add the content; for HEAD requests the headers are all there is
-        if (webServer->httpMethod() == swsGET) {
-            message += homePage;
-        }
-
-    // Otherwise, they asked for some other resource. We don't have it. Respond with "404 Not Found" message
-    } else {
-        message = swsNotFoundResponseHeaders;
-    }
-    return message;
+void sendHomePage(WiFiClient* httpClient) {
+// The HTML for the device's "home page"
+const char* homePage  = "<!DOCTYPE html>\n"
+                        "<html>\n"
+                        "  <head>\n"
+                        "    <meta charset=\"utf-8\" />\n"
+                        "  </head>\n"
+                        "  <body>\n"
+                        "    <h1>" BANNER "</h1>\n"
+                        "    <p>The outlet is currently %s.</p>\n"
+                        "    <form>\n"
+                        "      <input type=\"submit\" value=\"Toggle Outlet\" formaction=\"/?" TOGGLE_QUERY "\""
+                        "        formmethod=\"post\"/>\n"
+                        "    </form>\n"
+                        "  </body>\n"
+                        "</html>\n\r\n";
+    httpClient->printf(homePage, outletIsOn() ? "on" : "off");
 }
 
 /**
- * @brief   HTTP POST method handler for webServer. Return the complete message for the 
- *          request -- headers and, if applicable,content -- that is the response to a 
- *          POST for the specified trPath and trQuery.
+ * @brief   HTTP GET and HEAD method handler for webServer. Send the complete message for the 
+ *          request -- headers and, if applicable, content -- that is the response to a GET (or 
+ *          HEAD) request for the specified trPath and trQuery to the httpClient.
  * 
- * @param webServer         The SimpleWebServer for which we're acting as the POST handler
- * @param trPath            The path portion of the URI of the resource being requested
- * @param trQuery           The trQuery (if any)
- * @return String           The message to be sent to the client
-  */
-String handlePost(SimpleWebServer* webServer, String trPath, String trQuery) {
-    // Assume the response starts with the usual response headers
-    String message = swsNormalResponseHeaders;
-    // We only respond well to a POST to the "home page" with a TOGGLE_QUERY query
+ * @param webServer         The SimpleWebServer for which we're acting as the GET and HEAD handlers.
+ * @param httpClient        The HTTP Client making the request.
+ * @param trPath            The path portion of the URI of the resource being requested.
+ * @param trQuery           The trQuery (if any).
+ */
+void handleGetAndHead(SimpleWebServer* webServer, WiFiClient* httpClient, String trPath, String trQuery) {
+
+    // We only have a "home page." If that's what was asked for, proceed.
+    if (trPath.equals("/") || trPath.equals("/index.html") || trPath.equals("index.htm")) {
+        httpClient->print(swsNormalResponseHeaders);
+        // If this is a GET request, add the content; for HEAD requests the headers are all there is.
+        if (webServer->httpMethod() == swsGET) {
+            sendHomePage(httpClient);
+        }
+
+    // Otherwise, they asked for some other resource. We don't have it. Respond with "404 Not Found" message.
+    } else {
+        httpClient->print( swsNotFoundResponseHeaders);
+    }
+}
+
+/**
+ * @brief   HTTP POST method handler for webServer. Send the complete message for the 
+ *          request -- headers and, if applicable, content -- that is the response to a 
+ *          POST for the specified trPath and trQuery to the httpClient.
+ * 
+ * @param webServer         The SimpleWebServer for which we're acting as the POST handler.
+ * @param httpClient        The HTTP client making the request.
+ * @param trPath            The path portion of the URI of the resource being requested.
+ * @param trQuery           The trQuery (if any).
+ */
+void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPath, String trQuery) {
+    // We only respond well to a POST to the "home page" with a TOGGLE_QUERY query.
     if ((trPath.equals("/") || trPath.equals("/index.html") || trPath.equals("index.htm")) && 
         trQuery.equalsIgnoreCase(TOGGLE_QUERY)) {
-        message += homePage;
+        httpClient->print(swsNormalResponseHeaders);
         toggleOutlet();
-    // Otherwise, they requested something we can't deal with. Respond with "400 Bad Request" message
+        sendHomePage(httpClient);
+    // Otherwise, they requested something we can't deal with. Respond with "400 Bad Request" message.
     } else {
-        message = swsBadRequestResponseHeaders;
+        httpClient->print(swsBadRequestResponseHeaders);
     }
-    return message;
 }
 
 /**
@@ -298,18 +312,18 @@ void onStatus(){
 }
 
 /**
- * @brief The Arduino setup function. Called once at power-on or reset
+ * @brief The Arduino setup function. Called once at power-on or reset.
  * 
  */
 void setup() {
-    // Do the basic hardware initialization
-    Serial.begin(9600);                 // Get Serial via UART up and running
+    // Do the basic hardware initialization.
+    Serial.begin(9600);                 // Get Serial via UART up and running.
     delay(SERIAL_CONN_MILLIS);
-    pinMode(LED, OUTPUT);               // Initialize the LED
+    pinMode(LED, OUTPUT);               // Initialize the LED.
     digitalWrite(LED, LED_DARK);
-    pinMode(RELAY, OUTPUT);             // Initialize the relay
+    pinMode(RELAY, OUTPUT);             // Initialize the relay.
     digitalWrite(RELAY, RELAY_OPEN);
-    button.begin();                     // Initialize the button
+    button.begin();                     // Initialize the button.
 
     // Attach the ui command handlers
     ui.attachDefaultCmdHandler(onUnrecognized);
@@ -324,18 +338,18 @@ void setup() {
         Serial.print("Couldn't attach all the ui command handlers.\n");
     }
 
-    Serial.println(BANNER);             // Say hello
+    Serial.println(BANNER);             // Say hello.
 
     // See if we have our configuration data available
     EEPROM.begin(sizeof(eepromData_t));
-    // If so try to get it from EEPROM
+    // If so try to get it from EEPROM.
     if (EEPROM.percentUsed() != -1) {
         EEPROM.get(0,config);
     }
-    // If the configuration signature is not what we expect, we don't have credentials
+    // If the configuration signature is not what we expect, we don't have credentials.
     running = config.signature == CONFIG_SIG;
     if (running) {
-        // Get the WiFi connection going
+        // Get the WiFi connection going.
         Serial.printf("\nConnecting to %s ", config.ssid);
         unsigned long startMillis = millis();
         WiFi.begin(config.ssid, config.password);
@@ -347,7 +361,7 @@ void setup() {
             Serial.print(" WiFi connected.\nIP address is ");
             Serial.println(WiFi.localIP());
             wiFiServer.begin();
-            // Get the webServer going and attach the HTTP method handlers
+            // Get the webServer going and attach the HTTP method handlers.
             webServer.begin(wiFiServer);
             webServer.attachMethodHandler(swsGET, handleGetAndHead);
             webServer.attachMethodHandler(swsHEAD, handleGetAndHead);
@@ -368,15 +382,15 @@ void setup() {
 }
 
 /**
- * @brief The Arduino loop function. Called repeatedly
+ * @brief The Arduino loop function. Called repeatedly.
  * 
  */
 void loop() {
 
-    // Let the ui do its thing
+    // Let the ui do its thing.
     ui.run();
 
-    // Deal with button clicks
+    // Deal with button clicks.
     if (button.clicked()) {
             toggleOutlet();
     }

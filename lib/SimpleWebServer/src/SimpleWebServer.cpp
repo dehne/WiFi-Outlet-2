@@ -1,6 +1,6 @@
 /****
  * @file SimpleWebServer.cpp
- * @version 0.1.0
+ * @version 0.2.0
  * 
  * This file is a portion of the package SimpleWebServer, a library that provides 
  * an ESP8266 Arduino sketch with the ability to service HTTP requests. See 
@@ -31,7 +31,7 @@
  ****/
 #include "SimpleWebServer.h"
 
-// Public member functions
+// Public member functions.
 
 /**
  * Constructor
@@ -69,10 +69,10 @@ void SimpleWebServer::run() {
     const char* swsMethodNames[SWS_METHOD_COUNT] = {"GET", "HEAD", "POST", "PUT", "DELETE",
                                                     "CONNECT", "OPTIONS", "TRACE", "PATCH"};
 
-    // Get the next waiting client, if any 
+    // Get the next waiting client, if any.
     WiFiClient client = server->accept();
 
-    // The existence of a client means there's a request to process
+    // The existence of a client means there's a request to process.
     if (client) {
         #ifdef SWS_DEBUG
         Serial.print("Client connected.\n");
@@ -86,37 +86,29 @@ void SimpleWebServer::run() {
         #endif
 
         // Analyze the request
-        String reqMethod = getWord(request);                // The first word in the request is the HTTP method
+        String reqMethod = getWord(request);                // The first word in the request is the HTTP method.
 
-        trPath = getWord(request, 1);                       // The second word in the request is the URI relative to the server root
-        trQuery = "";                                       // Extract the query portion, if any
+        trPath = getWord(request, 1);                       // The second word in the request is the "origin form" URI.
+        trQuery = "";                                       // From the URI, extract the query portion, if any.
         int queryStart = trPath.indexOf("?");
         if (queryStart != -1) {
             trQuery = trPath.substring(queryStart + 1);
-            trPath = trPath.substring(0, queryStart);       // What remains is the path portion
+            trPath = trPath.substring(0, queryStart);       // What remains is the path portion.
         }
         #ifdef SWS_DEBUG
         Serial.printf("The request method is %s. The resource path is \"%s\" and the query is \"%s\".\n", 
             reqMethod.c_str(), trPath.c_str(), trQuery.c_str());
         #endif
 
-        // Find the handler for the requested method and dispatch it to get the message we should send to the client
-        String message = "";
+        // Find the methodHandler for the requested method and dispatch it to send the response message to the client.
         for (uint8_t i = 0; i < SWS_METHOD_COUNT; i++) {
             if (i == SWS_METHOD_COUNT - 1 || reqMethod.equals(swsMethodNames[i])) {
                 trMethod = (swsHttpMethod_t)i;
-                message = (*handlers[i])(this, trPath, trQuery);
+                (*handlers[i])(this, &client, trPath, trQuery);
                 break;
             }
         }
-        
-        // Send the response to the client
-        #ifdef SWS_DEBUG
-        Serial.print("Sending response:\n");
-        Serial.print(message);
-        #endif
-        client.print(message);
-
+        // That's it. We're done. Clean things up for when the next request comes.
         client.stop();
         trPath = "";
         trQuery = "";
@@ -189,20 +181,20 @@ String SimpleWebServer::getClientRequest(WiFiClient client) {
 /**
  * defaultGetAndHeadHandler()
  */
-String SimpleWebServer::defaultGetAndHeadHandler(SimpleWebServer* server, String path, String query) {
-    return swsNotFoundResponseHeaders;
+void SimpleWebServer::defaultGetAndHeadHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
+    httpClient->print(swsNotFoundResponseHeaders);
 }
 
 /**
  * defaultUnimplementedHandler()
  */
-String SimpleWebServer::defaultUnimplementedHandler(SimpleWebServer* server, String path, String query) {
-    return swsNotImplementedResponseHeaders;
+void SimpleWebServer::defaultUnimplementedHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
+    httpClient->print(swsNotImplementedResponseHeaders);
 }
 
 /**
  * defaultBadHandler
  */
-String SimpleWebServer::defaultBadHandler(SimpleWebServer* server, String path, String query) {
-    return swsBadRequestResponseHeaders;
+void SimpleWebServer::defaultBadHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
+    httpClient->print(swsBadRequestResponseHeaders);
 }
