@@ -72,6 +72,7 @@
 /*
  * Miscellaneous constants
  */
+//#define SWS_DEBUG                               // Uncomment to enable debug printing
 #define SWS_CLIENT_WAIT_MILLIS      (10000)     // Maximum millis() to wiat for clien
 
 /**
@@ -92,6 +93,13 @@ const char swsNormalResponseHeaders[] =     "HTTP/1.1 200 OK\r\n"
                                             "Connection: close\r\n\r\n";
 
 /**
+ * @brief   Typical response to a request that's just wrong. For a malformed query string, for 
+ *          example, send this as the message
+ * 
+ */
+const char swsBadRequestResponseHeaders[] = "400 Bad Request\r\n"
+                                            "Connection: close\r\n\r\n";
+/**
  * @brief   Typical response to a request for something the handler doesn't have. Just make this 
  *          be the entire message.
  * 
@@ -100,12 +108,13 @@ const char swsNotFoundResponseHeaders[] =   "404 Not Found\r\n"
                                             "Connection: close\r\n\r\n";
 
 /**
- * @brief   Typical response to a request that's just wrong. For a malformed query string, for 
- *          example, send this as the message
+ * @brief   Typical response when either the server does not recognize the request method, or 
+ *          lacks the ability to fulfil the request.
  * 
  */
-const char swsBadRequestResponseHeaders[] = "400 Bad Request\r\n"
-                                            "Connection: close\r\n\r\n";
+const char swsNotImplementedResponseHeaders[] = "501 Not Implemented\r\n"
+                                                "Connection: close\r\n"
+                                                "\r\n";
 
 class SimpleWebServer {
     public:

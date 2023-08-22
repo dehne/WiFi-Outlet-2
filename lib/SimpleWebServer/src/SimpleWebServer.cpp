@@ -74,12 +74,16 @@ void SimpleWebServer::run() {
 
     // The existence of a client means there's a request to process
     if (client) {
+        #ifdef SWS_DEBUG
         Serial.print("Client connected.\n");
+        #endif
 
         // Get the client's request
         String request = getClientRequest(client);
+        #ifdef SWS_DEBUG
         Serial.print("Got this request:\n");
         Serial.print(request);
+        #endif
 
         // Analyze the request
         String reqMethod = getWord(request);                // The first word in the request is the HTTP method
@@ -91,8 +95,10 @@ void SimpleWebServer::run() {
             trQuery = trPath.substring(queryStart + 1);
             trPath = trPath.substring(0, queryStart);       // What remains is the path portion
         }
+        #ifdef SWS_DEBUG
         Serial.printf("The request method is %s. The resource path is \"%s\" and the query is \"%s\".\n", 
             reqMethod.c_str(), trPath.c_str(), trQuery.c_str());
+        #endif
 
         // Find the handler for the requested method and dispatch it to get the message we should send to the client
         String message = "";
@@ -105,15 +111,19 @@ void SimpleWebServer::run() {
         }
         
         // Send the response to the client
+        #ifdef SWS_DEBUG
         Serial.print("Sending response:\n");
         Serial.print(message);
+        #endif
         client.print(message);
 
         client.stop();
         trPath = "";
         trQuery = "";
         trMethod = swsBAD_REQ;
+        #ifdef SWS_DEBUG
         Serial.print("Client disconnected.\n");
+        #endif
     }
 }
 
@@ -169,8 +179,10 @@ String SimpleWebServer::getClientRequest(WiFiClient client) {
             }
         }
     }
+    #ifdef SWS_DEBUG
     Serial.print("[getRequest] Timed out. Request is:\n");
     Serial.println(request);
+    #endif
     return "";
 }
 
@@ -178,26 +190,19 @@ String SimpleWebServer::getClientRequest(WiFiClient client) {
  * defaultGetAndHeadHandler()
  */
 String SimpleWebServer::defaultGetAndHeadHandler(SimpleWebServer* server, String path, String query) {
-    return "404 Not Found\r\n"
-           "Connection: close\r\n"
-           "\r\n";
+    return swsNotFoundResponseHeaders;
 }
 
 /**
  * defaultUnimplementedHandler()
  */
 String SimpleWebServer::defaultUnimplementedHandler(SimpleWebServer* server, String path, String query) {
-    return "501 Not Implemented\r\n"
-           "Connection: close\r\n"
-           "\r\n";
+    return swsNotImplementedResponseHeaders;
 }
 
 /**
  * defaultBadHandler
- * 400 Bad Request
  */
 String SimpleWebServer::defaultBadHandler(SimpleWebServer* server, String path, String query) {
-    return "400 Bad Request\r\n"
-           "Connection: close\r\n"
-           "\r\n";
+    return swsBadRequestResponseHeaders;
 }
