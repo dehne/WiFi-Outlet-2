@@ -9,8 +9,8 @@
  * About this project
  * ==================
  * 
- * This sketch presents the Sharper Image model 70011 WiFi controlled outlet as a web server on 
- * the local WiFi network. It presents a web page showing two types of schedule for turning the 
+ * This sketch presents the Sharper Image model 70011 WiFi controlled outlet as a one-page web 
+ * site on the local WiFi network. The web page shows two types of schedule for turning the 
  * outlet on and off at specified times of day. One schedule provides up to three on-off cycles 
  * per day. The other has one on-off cycle for weekdays and another for weekend days. Using the 
  * page you can set the times and which schedule to use. The page also lets you turn the outlet 
