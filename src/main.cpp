@@ -1,6 +1,6 @@
 /****
  * @file main.cpp
- * @version 1.0.0
+ * @version 1.1.0
  * @date August 28, 2023
  * 
  * WiFi Outlet -- Replacement firmware for the 2017 Sharper Image model 70011 WiFi 
@@ -124,7 +124,7 @@
 #define RELAY           (14)                        // On the WiFi outlet PCB, the relay that controls the outlet
 
 // Misc constants
-#define BANNER              "WiFi Switch V1.0.0"    // The tagline to identify this sketch
+#define BANNER              "WiFi Switch V1.1.0"    // The tagline to identify this sketch
 #define NTP_SERVER          "pool.ntp.org"          // The NTP server we use
 #define TOGGLE_QUERY        "outlet=toggle"         // The URI query string to cause the outlet to toggle state
 #define SCHED_UPDATE_QUERY  "schedule=update"       // The URI query string to cause the schedule parms to be updated
@@ -143,7 +143,7 @@
 #define WIFI_CONN_MILLIS    (15000)                 // millis() to wait for WiFi connect before giving up
 #define NTP_SET_MILLIS      (10000)                 // millis() to wait for NTP server to set the time
 #define DAWN_OF_HISTORY     (1533081600)            // Well, actually August 1st, 2018
-#define CONFIG_SIG          (0x3940)                // Our "signature" in EEPROM to know the data is (probably) ours
+#define CONFIG_SIG          (0x3680)                // Our "signature" in EEPROM to know the data is (probably) ours
 
 typedef unsigned int minPastMidnight_t;             // Minutes past midnight: 0 --> 1399
 
@@ -152,6 +152,7 @@ struct eepromData_t {
     char ssid[33];                                  // SSID of the WiFi network we should use.
     char password[64];                              // Password to use to connect to the WiFi
     char timeZone[32];                              // The POSIX timezone string for the timezone we use (see TZ.h)
+    char outletName[32];                            // The name of the outlet
     bool enabled;                                   // If true, the schedule is enabled; false schedule is diabled
     bool useWeekly;                                 // If true we should use the weekly schedule, false, use the daily
     bool dailyEnable[3];                            // Whether each of the three daily on/off periods is enabled
@@ -167,8 +168,8 @@ WiFiServer wiFiServer {80};
 SimpleWebServer webServer;
 PushButton button {BUTTON};
 UserInput ui {};
-//                   sig ssid pw  timezone                  enabled useWeekly --- dailyEnable --
-eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", false,  false,    true, false, false, 
+//                   sig ssid pw  timezone                  outletName  enabled useWeekly --- dailyEnable --
+eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", "McOutlet", false,  false,    true, false, false, 
 //                   -- dailyOnTime ---  -- dailyOffTime ----
                      8*60, 13*60, 19*60, 12*60, 17*60 , 21*60, 
 //                   wkDyOn wkDyOff wkEnOn wkEnOff
@@ -204,6 +205,23 @@ String fromMinsPastMidnight(minPastMidnight_t minsPastMidnight) {
 }
 
 /**
+ * @brief Toggle the state of the LED
+ * 
+ */
+inline void toggleLED() {
+    digitalWrite(LED, digitalRead(LED) == LED_DARK ? LED_LIT : LED_DARK);
+}
+
+/**
+ * @brief Set the LED to the specified state 
+ * 
+ * @param state     The state to set the LED to -- LED_DARK or LED_LIT
+ */
+inline void setLEDto(int state) {
+    digitalWrite(LED, state);
+}
+
+/**
  * 
  * @brief Set the system clock to the current local time and date using an NTP server. 
  * 
@@ -215,15 +233,20 @@ bool setClock() {
     configTzTime(config.timeZone, NTP_SERVER);
     time_t nowSecs = 0;
     unsigned long startMillis = millis();
+    Serial.print(F("Waiting for NTP time sync..."));
     do {
-        Serial.print(F("Waiting for NTP time sync..."));
         nowSecs = time(nullptr);
+        Serial.print(".");
+        toggleLED();
+        delay(WIFI_DELAY_MILLIS);
     } while (nowSecs < DAWN_OF_HISTORY && millis() - startMillis < NTP_SET_MILLIS);
     if (nowSecs > DAWN_OF_HISTORY) {
         Serial.printf("Sync successful. Current time: %s", ctime(&nowSecs)); // ctime() appends a "\n", just because.
+        setLEDto(LED_LIT);
         return true;
     } else {
         Serial.print("Unable to set the time.\n");
+        setLEDto(LED_DARK);
         return false;
     }
 }
@@ -264,7 +287,6 @@ bool outletIsOn() {
 void toggleOutlet() {
     uint8_t newRelayState = digitalRead(RELAY) == RELAY_CLOSED ? RELAY_OPEN : RELAY_CLOSED;
     digitalWrite(RELAY, newRelayState);
-    digitalWrite(LED, newRelayState == RELAY_CLOSED ? LED_LIT : LED_DARK);
 }
 
 /**
@@ -274,7 +296,6 @@ void toggleOutlet() {
  */
 void setOutletTo(bool outletOn) {
     digitalWrite(RELAY, outletOn ? RELAY_CLOSED : RELAY_OPEN);
-    digitalWrite(LED, outletOn ? LED_LIT : LED_DARK);
 
     #ifdef DEBUG
     Serial.printf("  Turned outlet %s.\n", outletOn ? "on" : "off");
@@ -311,7 +332,7 @@ void sendHomePage(WiFiClient* httpClient) {
                         "</style>\n"
                         "</head>\n"
                         "<body>\n"
-                        "<h1>WiFi Outlet Control Panel</h1>\n"
+                        "<h1>WiFi Outlet &ldquo;@outletName&rdquo; Control Panel</h1>\n"
                         "<p>Using this page you can set up and control your WiFi outlet. You can set up daily and weekly "
                         "schedules, and switch between which to follow. You can also turn schedule-following on and off "
                         "or just manually control the outlet.</p>\n"
@@ -403,6 +424,7 @@ void sendHomePage(WiFiClient* httpClient) {
                         "\r\n";
 
     // Substitute all the variable information needed in the HTLM. Each variable in the text is a name beginning with "@"
+    pageHtml.replace("@outletName", config.outletName);
     pageHtml.replace("@dailyChecked", config.useWeekly ? "" : "checked");
     pageHtml.replace("@dg0Checked", config.dailyEnable[0] ? "checked" : "");
     pageHtml.replace("@dg0n", fromMinsPastMidnight(config.dailyOnTime[0]));
@@ -694,6 +716,7 @@ void onHelp() {
         "  ssid [<ssid>]    Print or set the ssid of the WiFi AP we should connect to\n"
         "  pw [<password>]  Print or set the password we are to use to connect\n"
         "  tz [<timezone>]  Print or set the POSIX time zone string for the time zone we are in\n"
+        "  name [<name>]    Print or set the outlet's name\n"
         "  save             Save the current ssid and password and continue\n"
         "  status           Print the status of the system\n"
         "  restart          Restart the device. E.g., to use newly saved WiFi credentials.\n"
@@ -710,7 +733,7 @@ void onSsid() {
     unsigned int ssidLen = ssid.length();
     if (ssidLen != 0 && ssidLen < sizeof(config.ssid)) {
         strcpy(config.ssid, ssid.c_str());
-        Serial.printf("Set SSID to \"%s\"\n", config.ssid);
+        Serial.printf("SSID changed to \"%s\"\n", config.ssid);
     } else if (ssidLen == 0) {
         Serial.printf("SSID is \"%s\"\n", config.ssid);
     } else {
@@ -728,7 +751,7 @@ void onPw() {
     unsigned int pwLen = pw.length();
     if (pwLen > 0 && pwLen < sizeof(config.password)) {
         strcpy(config.password, pw.c_str());
-        Serial.printf("Set password to \"%s\"\n", config.password);
+        Serial.printf("Password changed to \"%s\"\n", config.password);
     } else if (pwLen == 0) {
         Serial.printf("Password is \"%s\"\n", config.password);
     } else {
@@ -743,11 +766,30 @@ void onPw() {
 void onTz() {
     String tz = ui.getWord(1);
     if (tz.length() == 0) {
-        Serial.printf("Timezone is set to %s\n", config.timeZone);
+        Serial.printf("Timezone is \"%s\".\n", config.timeZone);
     } else if (tz.length() < sizeof(config.timeZone)) {
         strcpy(config.timeZone, tz.c_str());
+        Serial.printf("Timezone changed to \"%s\".\n", config.outletName);
     } else {
         Serial.printf("Time zone string too long; max length is %d.\n", sizeof(config.timeZone));
+    }
+}
+
+/**
+ * @brief The name ui command handler. Called by the ui object as needed.
+ * 
+ */
+void onName() {
+    String name = ui.getCommandLine().substring(ui.getWord(0).length());
+    name.trim();
+    unsigned int nameLen = name.length();
+    if (nameLen != 0 && nameLen < sizeof(config.outletName)) {
+        strcpy(config.outletName, name.c_str());
+        Serial.printf("Outlet name changed to \"%s\"\n", config.outletName);
+    } else if (nameLen == 0) {
+        Serial.printf("Outlet name is \"%s\"\n", config.outletName);
+    } else {
+        Serial.printf("The specified outlet name is too long. Maximum length is %d\n", sizeof(config.outletName) - 1);
     }
 }
 
@@ -801,7 +843,7 @@ void setup() {
     Serial.begin(9600);                 // Get Serial via UART up and running.
     delay(SERIAL_CONN_MILLIS);
     pinMode(LED, OUTPUT);               // Initialize the LED.
-    digitalWrite(LED, LED_DARK);
+    setLEDto(LED_DARK);
     pinMode(RELAY, OUTPUT);             // Initialize the relay.
     digitalWrite(RELAY, RELAY_OPEN);
     button.begin();                     // Initialize the button.
@@ -814,6 +856,7 @@ void setup() {
         ui.attachCmdHandler("ssid", onSsid) &&
         ui.attachCmdHandler("pw", onPw) &&
         ui.attachCmdHandler("tz", onTz) &&
+        ui.attachCmdHandler("name", onName) &&
         ui.attachCmdHandler("save", onSave) &&
         ui.attachCmdHandler("status", onStatus) &&
         ui.attachCmdHandler("restart", onRestart))
@@ -839,6 +882,7 @@ void setup() {
         while (WiFi.status() != WL_CONNECTED && millis() - startMillis < WIFI_CONN_MILLIS) {
             delay(WIFI_DELAY_MILLIS);
             Serial.print(".");
+            toggleLED();
         }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.print(" WiFi connected.\nIP address is ");
@@ -851,6 +895,7 @@ void setup() {
             webServer.attachMethodHandler(swsGET, handleGetAndHead);
             webServer.attachMethodHandler(swsHEAD, handleGetAndHead);
             webServer.attachMethodHandler(swsPOST, handlePost);
+            setLEDto(LED_LIT);
         } else {
             Serial.printf("Unable to connect to WiFi. Status: %d\n", WiFi.status());
             running = false;
@@ -878,6 +923,11 @@ void loop() {
     // Deal with button clicks.
     if (button.clicked()) {
             toggleOutlet();
+    }
+
+    // Deal with button long presses
+    if (button.longPressed()) {
+        ESP.restart();      // Since the button is held down, we'll enter "PGM from UART" mode
     }
 
     // If the webServer is running, let it do its thing.
