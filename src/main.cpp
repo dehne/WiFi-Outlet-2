@@ -142,6 +142,7 @@
 #define WIFI_DELAY_MILLIS   (500)                   // millis() to delay between printing "." while waitinf for WiFi
 #define WIFI_CONN_MILLIS    (15000)                 // millis() to wait for WiFi connect before giving up
 #define NTP_SET_MILLIS      (10000)                 // millis() to wait for NTP server to set the time
+#define NOT_RUNNING_MILLIS  (10UL * 60 * 1000)      // millis() to wait before restarting if internet not available
 #define DAWN_OF_HISTORY     (1533081600)            // Well, actually August 1st, 2018
 #define CONFIG_SIG          (0x3680)                // Our "signature" in EEPROM to know the data is (probably) ours
 
@@ -178,7 +179,8 @@ eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", "McOutlet", false,  
 enum formDataName_t : uint8_t {fdStype, fdDg0, fdDg1, fdDg2, fdDg0n, fdDg0f, fdDg1n, fdDg1f, fdDg2n, fdDg2f, fdWdn, fdWdf, fdWen, fdWef, _formDataNameSize_};
 String formDataNames[_formDataNameSize_] =
                               {"stype", "Dg0", "Dg1", "Dg2", "Dg0n", "Dg0f", "Dg1n", "Dg1f", "Dg2n", "Dg2f", "wdn", "wdf", "wen", "wef"};
-bool running;                                       // False when can't get WiFi, time, etc.
+unsigned long noInternetMillis;                     // millis() when we noticed the internet wasn't available; 0 otherwise
+bool running;                                       // True if we have a config, connect to WiFi and successfully set the time.
 bool scheduleUpdated;                               // True when schedule updated since last looked at by followSchedule()
 
 /**
@@ -419,6 +421,8 @@ void sendHomePage(WiFiClient* httpClient) {
                         "<p>The outlet is currently @outletIs. To turn it @outletWillBe click the button below.</p>\n"
                         "<input type=\"submit\" value=\"Turn outlet @outletWillBe\" formaction=\"/index.html?" TOGGLE_QUERY "\" />\n"
                         "</form>\n"
+                        "<p>&nbsp;</p>\n"
+                        "<p style=\"font-size: 80%\">@outletBanner Copyright &copy; 2023 by D. L. Ehnebuske.</p>\n"
                         "</body>\n"
                         "</html>\r\n"
                         "\r\n";
@@ -445,6 +449,7 @@ void sendHomePage(WiFiClient* httpClient) {
     pageHtml.replace("@schEnButton", config.enabled ? "Disable" : "Enable");
     pageHtml.replace("@outletIs", outletIsOn() ? "on" : "off");
     pageHtml.replace("@outletWillBe", outletIsOn() ? "off" : "on");
+    pageHtml.replace("@outletBanner", BANNER);
 
     httpClient->print(pageHtml);        // Send the complete text to the client.
 }
@@ -872,8 +877,9 @@ void setup() {
     if (EEPROM.percentUsed() != -1) {
         EEPROM.get(0,config);
     }
-    // If the configuration signature is not what we expect, we don't have credentials.
-    running = config.signature == CONFIG_SIG;
+    // If the configuration signature is what we expect and there's an SSID and password, presume we'll get up and going
+    running = config.signature == CONFIG_SIG && config.ssid[0] != '\0' && config.password[0] != '\0';
+    noInternetMillis = 0;
     if (running) {
         // Get the WiFi connection going.
         Serial.printf("\nConnecting to %s ", config.ssid);
@@ -898,7 +904,11 @@ void setup() {
             setLEDto(LED_LIT);
         } else {
             Serial.printf("Unable to connect to WiFi. Status: %d\n", WiFi.status());
-            running = false;
+            running = false;                    // We're not running
+        }
+        // If we should have been able to connect and get the time, but couldn't note when it happened
+        if (!running) {
+            noInternetMillis = millis();
         }
     } else {
         Serial.print("No stored WiFi credentials found.\n");
@@ -916,23 +926,37 @@ void setup() {
  * 
  */
 void loop() {
+    unsigned long curMillis = millis();     // millis() now
 
     // Let the ui do its thing.
     ui.run();
 
-    // Deal with button clicks.
+    // Deal with button clicks: toggle outlet.
     if (button.clicked()) {
             toggleOutlet();
     }
 
-    // Deal with button long presses
+    // Deal with button long presses: restart and, because the button is down, enter "PGM from UART" mode.
     if (button.longPressed()) {
-        ESP.restart();      // Since the button is held down, we'll enter "PGM from UART" mode
+        ESP.restart();
     }
 
-    // If the webServer is running, let it do its thing.
+    // If everything should be up and running,
     if (running) {
-        webServer.run();    // Let the web server do its thing
-        followSchedule();   // Let the schedule follower do its thing
+        // If the WiFi is still connected
+        if (WiFi.status() == WL_CONNECTED) {
+            webServer.run();                    // Let the web server do its thing
+            followSchedule();                   // Let the schedule follower do its thing
+            noInternetMillis = 0;               // We do have an internet connection (perhaps reacquired)
+
+        // Otherwise, the WiFi connection we had isn't there anymore. If this the first we saw that
+        } else if (noInternetMillis == 0) {
+            noInternetMillis = curMillis;       // Note when we first noticed there was no internet connection
+        }
+    }
+    
+    // If it looks like the internet is configured but hasn't been available for some time
+    if (curMillis - noInternetMillis > NOT_RUNNING_MILLIS && config.ssid[0] != '\0' && config.password[0] != '\0') {
+        ESP.restart();                          // Try restarting
     }
 }
