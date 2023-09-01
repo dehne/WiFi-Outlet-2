@@ -1,7 +1,7 @@
 /****
  * @file main.cpp
- * @version 1.1.0
- * @date August 28, 2023
+ * @version 1.1.1
+ * @date August 31, 2023
  * 
  * WiFi Outlet -- Replacement firmware for the 2017 Sharper Image model 70011 WiFi 
  * controlled outlet. 
@@ -124,7 +124,7 @@
 #define RELAY           (14)                        // On the WiFi outlet PCB, the relay that controls the outlet
 
 // Misc constants
-#define BANNER              "WiFi Switch V1.1.0"    // The tagline to identify this sketch
+#define BANNER              "WiFi Switch V1.1.1"    // The tagline to identify this sketch
 #define NTP_SERVER          "pool.ntp.org"          // The NTP server we use
 #define TOGGLE_QUERY        "outlet=toggle"         // The URI query string to cause the outlet to toggle state
 #define SCHED_UPDATE_QUERY  "schedule=update"       // The URI query string to cause the schedule parms to be updated
@@ -138,12 +138,13 @@
 #define RELAY_CLOSED        (HIGH)                  // digitalWrite value to close the relay
 #define OUTLET_ON           (true)                  // For setOutlet()
 #define OUTLET_OFF          (false)                 // For setOutlet()
-#define SERIAL_CONN_MILLIS  (4000)                  // millis() to wait after Serial.begin() to start using it
-#define WIFI_DELAY_MILLIS   (500)                   // millis() to delay between printing "." while waitinf for WiFi
+#define SERIAL_CONN_MILLIS  (4000)                  // millis() to wait after Serial.begin() before using it
+#define WIFI_DELAY_MILLIS   (500)                   // millis() to delay between printing "." while waiting for WiFi and NTP
 #define WIFI_CONN_MILLIS    (15000)                 // millis() to wait for WiFi connect before giving up
 #define NTP_SET_MILLIS      (10000)                 // millis() to wait for NTP server to set the time
-#define NOT_RUNNING_MILLIS  (10UL * 60 * 1000)      // millis() to wait before restarting if internet not available
-#define DAWN_OF_HISTORY     (1533081600)            // Well, actually August 1st, 2018
+#define NOT_RUNNING_MINS    (10UL)                  // minutes to wait before restarting if internet not available
+#define NOT_RUNNING_MILLIS  (NOT_RUNNING_MINS * 60000) // same as NOT_RUNNING_MINS but in micros()
+#define DAWN_OF_HISTORY     (1533081600)            // Well, actually time_t for August 1st, 2018
 #define CONFIG_SIG          (0x3680)                // Our "signature" in EEPROM to know the data is (probably) ours
 
 typedef unsigned int minPastMidnight_t;             // Minutes past midnight: 0 --> 1399
@@ -154,8 +155,8 @@ struct eepromData_t {
     char password[64];                              // Password to use to connect to the WiFi
     char timeZone[32];                              // The POSIX timezone string for the timezone we use (see TZ.h)
     char outletName[32];                            // The name of the outlet
-    bool enabled;                                   // If true, the schedule is enabled; false schedule is diabled
-    bool useWeekly;                                 // If true we should use the weekly schedule, false, use the daily
+    bool enabled;                                   // If true, the schedule is enabled; if false schedule is diabled
+    bool useWeekly;                                 // If true use the weekly schedule, if false, use the daily
     bool dailyEnable[3];                            // Whether each of the three daily on/off periods is enabled
     minPastMidnight_t dailyOnTime[3];               // The turn-on time for each of the three daily on/off periods
     minPastMidnight_t dailyOffTime[3];              // The turn-off time for each of the three daily on/off periods
@@ -165,21 +166,28 @@ struct eepromData_t {
     minPastMidnight_t weekendOffTime;               // The turn-off time for weekends
 };
 
-WiFiServer wiFiServer {80};
-SimpleWebServer webServer;
-PushButton button {BUTTON};
-UserInput ui {};
+WiFiServer wiFiServer {80};                         // The WiFi server on port 80
+SimpleWebServer webServer;                          // The web server object
+PushButton button {BUTTON};                         // The PushButtone encapsulating the device's push button switch
+UserInput ui {};                                    // The command line interpreter object
+
+// The configuration we'll use preset with default values
 //                   sig ssid pw  timezone                  outletName  enabled useWeekly --- dailyEnable --
 eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", "McOutlet", false,  false,    true, false, false, 
+
 //                   -- dailyOnTime ---  -- dailyOffTime ----
                      8*60, 13*60, 19*60, 12*60, 17*60 , 21*60, 
+
 //                   wkDyOn wkDyOff wkEnOn wkEnOff
                      7*60,  17*60,  18*60, 22*60};  // Default config
 
-enum formDataName_t : uint8_t {fdStype, fdDg0, fdDg1, fdDg2, fdDg0n, fdDg0f, fdDg1n, fdDg1f, fdDg2n, fdDg2f, fdWdn, fdWdf, fdWen, fdWef, _formDataNameSize_};
+// The field names in the web page's form. A POST request uses these to report form field values.
+enum formDataName_t : uint8_t 
+    {fdStype, fdDg0, fdDg1, fdDg2, fdDg0n, fdDg0f, fdDg1n, fdDg1f, fdDg2n, fdDg2f, fdWdn, fdWdf, fdWen, fdWef, _formDataNameSize_};
 String formDataNames[_formDataNameSize_] =
-                              {"stype", "Dg0", "Dg1", "Dg2", "Dg0n", "Dg0f", "Dg1n", "Dg1f", "Dg2n", "Dg2f", "wdn", "wdf", "wen", "wef"};
-unsigned long noInternetMillis;                     // millis() when we noticed the internet wasn't available; 0 otherwise
+    {"stype", "Dg0", "Dg1", "Dg2", "Dg0n", "Dg0f", "Dg1n", "Dg1f", "Dg2n", "Dg2f", "wdn", "wdf", "wen", "wef"};
+
+unsigned long noWiFiMillis;                         // millis() when we noticed the WiFi wasn't available; 0 otherwise
 bool running;                                       // True if we have a config, connect to WiFi and successfully set the time.
 bool scheduleUpdated;                               // True when schedule updated since last looked at by followSchedule()
 
@@ -879,7 +887,7 @@ void setup() {
     }
     // If the configuration signature is what we expect and there's an SSID and password, presume we'll get up and going
     running = config.signature == CONFIG_SIG && config.ssid[0] != '\0' && config.password[0] != '\0';
-    noInternetMillis = 0;
+    noWiFiMillis = 0;
     if (running) {
         // Get the WiFi connection going.
         Serial.printf("\nConnecting to %s ", config.ssid);
@@ -908,7 +916,9 @@ void setup() {
         }
         // If we should have been able to connect and get the time, but couldn't note when it happened
         if (!running) {
-            noInternetMillis = millis();
+            Serial.printf("Expected to connect to WiFi and set the time, but couldn't. Will try again in %ld minutes.\n", 
+                NOT_RUNNING_MINS);
+            noWiFiMillis = millis();
         }
     } else {
         Serial.print("No stored WiFi credentials found.\n");
@@ -936,9 +946,10 @@ void loop() {
             toggleOutlet();
     }
 
-    // Deal with button long presses: restart and, because the button is down, enter "PGM from UART" mode.
+    // Deal with button long presses: reset and, because the button is down, enter "PGM from UART" mode.
     if (button.longPressed()) {
-        ESP.restart();
+        Serial.print("Resetting for firmware update.\n");
+        ESP.reset();
     }
 
     // If everything should be up and running,
@@ -947,16 +958,19 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             webServer.run();                    // Let the web server do its thing
             followSchedule();                   // Let the schedule follower do its thing
-            noInternetMillis = 0;               // We do have an internet connection (perhaps reacquired)
+            noWiFiMillis = 0;               // We do have an internet connection (perhaps reacquired)
 
         // Otherwise, the WiFi connection we had isn't there anymore. If this the first we saw that
-        } else if (noInternetMillis == 0) {
-            noInternetMillis = curMillis;       // Note when we first noticed there was no internet connection
+        } else if (noWiFiMillis == 0) {
+            Serial.printf("Oops! The WiFi connection seems to have disappeared. Will try to reconnect in %ld minutes.\n",
+                NOT_RUNNING_MINS);
+            noWiFiMillis = curMillis;       // Note when we first noticed there was no internet connection
         }
     }
     
     // If it looks like the internet is configured but hasn't been available for some time
-    if (curMillis - noInternetMillis > NOT_RUNNING_MILLIS && config.ssid[0] != '\0' && config.password[0] != '\0') {
+    if (noWiFiMillis != 0 && curMillis - noWiFiMillis > NOT_RUNNING_MILLIS && config.ssid[0] != '\0' && config.password[0] != '\0') {
+        Serial.print("Restarting to see if the WiFi is back.\n");
         ESP.restart();                          // Try restarting
     }
 }
