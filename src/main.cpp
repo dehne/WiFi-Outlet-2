@@ -115,8 +115,9 @@
 #include <WiFiUdp.h>                                // UDP support needed by SmartCOnfig
 #include <ESP_EEPROM.h>                             // Enhanced EEPROM emulator for ESP8266
 #include <PushButton.h>                             // My pushbutton support library
-#include <UserInput.h>                              // My simple command line support library
-#include <SimpleWebServer.h>                        // The web server library in ../lib/SimpleWebServe
+#include <CommandLine.h>                            // My simple command line support library
+#include <SimpleWebServer.h>                        // The web server library
+#include <WebCmd.h>                                 // The "friend" extension of CommandLine for SimpleWebServer
 
 // Pin definitions
 #define LED             (13)                        // On the WiFi outlet PCB, this is active LOW
@@ -131,6 +132,7 @@
 #define SCHED_TOGGLE_QUERY  "schedule=toggle"       // The URI query string to cause the schedule enable/disable toggle
 #define DAILY_SCHED_VALUE   "daily"                 // The value of the <input type="radio" /> selecting the daily schedule
 #define WEEKLY_SCHED_VALUE  "weekly"                // The value of the <input type="radio" /> selecting the weekly schedule
+#define CMD_SCREEN_LINES    (30)                    // The number of lines of text in the commandline.html "screen"
 
 #define LED_LIT             (LOW)                   // digitalWrite value to light the LED
 #define LED_DARK            (HIGH)                  // digitalWrite value to turn the LED off
@@ -169,7 +171,9 @@ struct eepromData_t {
 WiFiServer wiFiServer {80};                         // The WiFi server on port 80
 SimpleWebServer webServer;                          // The web server object
 PushButton button {BUTTON};                         // The PushButtone encapsulating the device's push button switch
-UserInput ui {};                                    // The command line interpreter object
+CommandLine ui {};                                  // The command line interpreter object
+WebCmd wc {&ui};                                    // The web command extension
+String screenContents;                              // For the web command page, the screen contents
 
 // The configuration we'll use preset with default values
 //                   sig ssid pw  timezone                  outletName  enabled useWeekly --- dailyEnable --
@@ -310,6 +314,75 @@ void setOutletTo(bool outletOn) {
     #ifdef DEBUG
     Serial.printf("  Turned outlet %s.\n", outletOn ? "on" : "off");
     #endif
+}
+
+/**
+ * @brief Assemble the current state of our commandline page and send it to the httpClient. 
+ * 
+ * @param httpClient    The HTTP client we are to send the assembled page to.
+ */
+void sendCommandLinePage(WiFiClient* httpClient) {
+    String pageHtml =   "<!doctype html>\n"
+                    "<html>\n"
+                    "<head>\n"
+                    "<meta charset=\"utf-8\">\n"
+                    "<title>WiFi Outlet Command Processor</title>\n"
+                    "<style>\n"
+                    "body {\n"
+                    "background-color: black;\n"
+                    "color: antiquewhite;\n"
+                    "font-family: \"Gill Sans\", \"Gill Sans MT\", \"Myriad Pro\", \"DejaVu Sans Condensed\", Helvetica, Arial, \"sans-serif\";\n"
+                    "}\n"
+                    "h1 {\n"
+                    "text-align: center;\n"
+                    "font-family: Cambria, \"Hoefler Text\", \"Liberation Serif\", Times, \"Times New Roman\", \"serif\";\n"
+                    "}\n"
+                    ".screen {\n"
+                    "font-family: Consolas, \"Andale Mono\", \"Lucida Console\", \"Lucida Sans Typewriter\", Monaco, \"Courier New\", \"monospace\";\n"
+                    "font-size: 12pt;\n"
+                    "color: lightgreen;\n"
+                    "}\n"
+                    "textarea {\n"
+                    "background-color: black;\n"
+                    "font-family: Consolas, \"Andale Mono\", \"Lucida Console\", \"Lucida Sans Typewriter\", Monaco, \"Courier New\", \"monospace\";\n"
+                    "font-size: 12pt;\n"
+                    "color: lightgreen;\n"
+                    "border-style: none;\n"
+                    "}\n"
+                    "input {\n"
+                    "background-color: black;\n"
+                    "font-family: Consolas, \"Andale Mono\", \"Lucida Console\", \"Lucida Sans Typewriter\", Monaco, \"Courier New\", \"monospace\";\n"
+                    "font-size: 12pt;\n"
+                    "color: lightgreen;\n"
+                    "border-style: none;\n"
+                    "}\n"
+                    "input:focus {\n"
+                    "outline: none!important\n"
+                    "}\n"
+                    "</style>\n"
+                    "</head>\n"
+                    "<body>\n"
+                    "<h1>WiFi Outlet &ldquo;@outletName&rdquo; Command Processor</h1>\n"
+                    "<p>Using this page you can interact with the Outlet's command processor.</p>\n"
+                    "<form method=\"post\">\n"
+                    "<textarea class=\"screen\" name=\"screen\" cols=\"120\" rows=\"@rows\" tabindex=\"0\">\n"
+                    "@display\n"
+                    "</textarea><br />\n"
+                    "<span class=\"screen\">@prompt </span><input type=\"text\" name=\"cmd\" maxlength=\"120\" size=\"120\" tabindex=\"0\" autofocus />\n"
+                    "<input type=\"submit\" tabindex=\"0\" hidden />\n"
+                    "</form>\n"
+                    "<p>&nbsp;</p>\n"
+                    "<p style=\"font-size: 80%\" >@outletBanner Copyright &copy; 2023 by D. L. Ehnebuske.</p>\n"
+                    "</body>\n"
+                    "</html>\r\n"
+                    "\r\n";
+    pageHtml.replace("@outletName", config.outletName);
+    pageHtml.replace("@rows", String(CMD_SCREEN_LINES));
+    pageHtml.replace("@display", screenContents);
+    pageHtml.replace("@prompt", CMD_PROMPT);
+    pageHtml.replace("@outletBanner", BANNER);
+
+    httpClient->print(pageHtml);
 }
 
 /**
@@ -474,7 +547,7 @@ void sendHomePage(WiFiClient* httpClient) {
  */
 void handleGetAndHead(SimpleWebServer* webServer, WiFiClient* httpClient, String trPath, String trQuery) {
 
-    // We only have a "home page." If that's what was asked for, proceed.
+    // We have a "home page." If that's what was asked for, proceed.
     if (trPath.equals("/") || trPath.equals("/index.html") || trPath.equals("index.htm")) {
         httpClient->print(swsNormalResponseHeaders);
         // If this is a GET request, add the content; for HEAD requests the headers are all there is.
@@ -488,11 +561,23 @@ void handleGetAndHead(SimpleWebServer* webServer, WiFiClient* httpClient, String
             ui.cancelCmd();
         #endif
         }
+    } else if (trPath.equals("/commandline.html") || (trPath.equals("/commandline.htm")) ) {
+        httpClient->print(swsNormalResponseHeaders);
+        if (webServer->httpMethod() == swsGET) {
+            sendCommandLinePage(httpClient);
+        #ifdef DEBUG
+            Serial.print("GET request for commandline page received and processed.\n");
+            ui.cancelCmd();
+        } else {
+            Serial.print("HEAD request for commandline page received and processed.\n");
+            ui.cancelCmd();
+        #endif
+        }
 
     // Otherwise, they asked for some other resource. We don't have it. Respond with "404 Not Found" message.
     } else {
-        httpClient->print(swsNotFoundResponseHeaders);
-        Serial.print("GET or HEAD request received for something other than the home page. Sent \"404 not found\"\n");
+        httpClient->print(swsNotFoundResponse);
+        Serial.print("GET or HEAD request received for some page we don't have. Sent \"404 not found\"\n");
         ui.cancelCmd();
     }
 }
@@ -593,22 +678,80 @@ void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPat
             #endif
             scheduleUpdated = true;     // Let followSchedule() know we've updated the schedule 
             
-        // Deal with a query we don't understand
+        // Deal with a query to home page that we don't understand
         } else {
-            Serial.printf("POST request received for query we don't understand: \"%s\"./n", trQuery.c_str());
+            Serial.printf("POST request received for query we don't understand: \"%s\".\n", trQuery.c_str());
+            Serial.printf(" Client message body: \"%s\".\n", webServer->clientBody().c_str());
             ui.cancelCmd(); // Reissue command prompt after print
-            httpClient->print(swsBadRequestResponseHeaders);
+            httpClient->print(swsBadRequestResponse);
             return;
         }
+
+        // Tell client we're good and go look at the home page for the result.
         httpClient->print("HTTP/1.1 303 See other\r\n"
-                        "Location: /index.html\r\n\r\n");
+                          "Location: /index.html\r\n\r\n");
+        return;
+
+    // Deal with a POST to the commandline page.
+    } else if (trPath.equals("/commandline.html") || trPath.equals("/commandline.htm")) {
+
+        // Retrieve the command and the current contents of the "screen"
+        String cmdLine = webServer->getFormDatum("cmd");
+        screenContents = webServer->getFormDatum("screen");
+
+        // From the screenContents remove all "\r" chars and trailing second "\n", if present.
+        screenContents.replace("\r", "");
+        if (screenContents.endsWith("\n\n")) {
+            screenContents.remove(screenContents.length() - 1);
+        }
+
+        // Execute the command and construct the line(s) we'll display on the screen.
+        String cmdResult = String(CMD_PROMPT) + cmdLine + "\n" + wc.doCommand(cmdLine);
+
+        // Count the number of lines in the result
+        int16_t resultLines = 1;
+        int16_t ix = 0;
+        while ((ix = cmdResult.indexOf("\n", ix) + 1) <= cmdResult.lastIndexOf("\n")) {
+            resultLines++;
+        }
+
+        // Remove trailing "\n", if any.
+        if (cmdResult.endsWith("\n")) {
+            cmdResult.remove(cmdResult.length() - 1);
+        }
+
+        // As needed, remove lines from the start of the result to get the line count below what fits on the screen.
+        while (resultLines > CMD_SCREEN_LINES) {
+            cmdResult = cmdResult.substring(cmdResult.indexOf("\n") + 1);
+            resultLines--;
+        }
+
+        // Count the lines in the current screenContents.
+        int16_t screenContentLines = 1;
+        ix = 0;
+        while ((ix = screenContents.indexOf("\n", ix) + 1) < screenContents.lastIndexOf("\n")) {
+            screenContentLines++;
+        }
+        
+        // As needed, remove lines from the start of screenContents to get the line count below what
+        // together with cmdResult fits on the screen. Then add the new results to the end.
+        while (screenContentLines + resultLines > CMD_SCREEN_LINES) {
+            screenContents = screenContents.substring(screenContents.indexOf("\n") + 1);
+            screenContentLines --;
+        }
+        screenContents += cmdResult;
+
+        // Tell the client we're good and to go look at the page again for the result.
+        httpClient->print("HTTP/1.1 303 See other\r\n"
+                          "Location: /commandline.html\r\n\r\n");
         return;
     }
-    // The client requested something we can't deal with. Respond with "400 Bad Request" message.
-    Serial.printf("POST request recived for something other than toggle outlet. path: \"%s\" query: \"%s\"./n",
+    // The client POSTed to a page we can't deal with. Respond with "400 Bad Request" message.
+    Serial.printf("POST request received for something other than the home page. path: \"%s\" query: \"%s\".\n",
         trPath.c_str(), trQuery.c_str());
+    Serial.printf(" Client message body: \"%s\".\n", webServer->clientBody().c_str());
     ui.cancelCmd(); // Reissue command prompt after print
-    httpClient->print(swsBadRequestResponseHeaders);
+    httpClient->print(swsBadRequestResponse);
 }
 
 /**
@@ -616,7 +759,7 @@ void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPat
  * 
  */
 void followSchedule() {
-    static minPastMidnight_t lastMinPastMidnight = 0;       // When we last noticed the time change
+    static minPastMidnight_t lastMinPastMidnight = 0;       // When we last noticed the time change.
     time_t curTime = time(nullptr);
     struct tm *timeval;
     timeval = localtime(&curTime);
@@ -710,19 +853,11 @@ void followSchedule() {
 }
 
 /**
- * @brief The "unrecognized command" command handler. Called by the ui object as needed.
- * 
- */
-void onUnrecognized() {
-    Serial.printf("Command \"%s\" is not recognized.\n", ui.getWord(0).c_str());
-}
-
-/**
  * @brief The "help" and "h" ui command handler. Called by ui object as needed.
  * 
  */
-void onHelp() {
-    Serial.print(
+String onHelp(CommandHandlerHelper* helper) {
+   return 
         "Help for " BANNER "\n"
         "  help             Print this text\n"
         "  h                Same as 'help'\n"
@@ -732,119 +867,110 @@ void onHelp() {
         "  name [<name>]    Print or set the outlet's name\n"
         "  save             Save the current ssid and password and continue\n"
         "  status           Print the status of the system\n"
-        "  restart          Restart the device. E.g., to use newly saved WiFi credentials.\n"
-    );
+        "  restart          Restart the device. E.g., to use newly saved WiFi credentials.\n";
 }
 
 /**
  * @brief The ssid ui command handler. Called by the ui object as needed.
  * 
  */
-void onSsid() {
-    String ssid = ui.getCommandLine().substring(ui.getWord(0).length());
+String onSsid(CommandHandlerHelper* helper) {
+    String ssid = helper->getCommandLine().substring(helper->getWord(0).length());
     ssid.trim();
     unsigned int ssidLen = ssid.length();
     if (ssidLen != 0 && ssidLen < sizeof(config.ssid)) {
         strcpy(config.ssid, ssid.c_str());
-        Serial.printf("SSID changed to \"%s\"\n", config.ssid);
+        return String("SSID changed to \"" + ssid + "\"\n");
     } else if (ssidLen == 0) {
-        Serial.printf("SSID is \"%s\"\n", config.ssid);
-    } else {
-        Serial.printf("Specified SSID is too long. Maximum length is %d\n", sizeof(config.ssid) - 1);
+        return String("SSID is \"") + String(config.ssid) + "\"\n";
     }
+    return String("Specified SSID is too long. Maximum length is ") + String(sizeof(config.ssid) - 1) + "\n";
 }
 
 /**
  * @brief The pw ui command handler. Called by the ui object as needed.
  * 
  */
-void onPw() {
-    String pw = ui.getCommandLine().substring(ui.getWord(0).length());
+String onPw(CommandHandlerHelper* helper) {
+    String pw = helper->getCommandLine().substring(helper->getWord(0).length());
     pw.trim();
     unsigned int pwLen = pw.length();
     if (pwLen > 0 && pwLen < sizeof(config.password)) {
         strcpy(config.password, pw.c_str());
-        Serial.printf("Password changed to \"%s\"\n", config.password);
+        return String("Password changed to \"") + pw + "\"\n";
     } else if (pwLen == 0) {
-        Serial.printf("Password is \"%s\"\n", config.password);
-    } else {
-        Serial.printf("Password is too long. Maximum length is %d", sizeof(config.password) - 1);
+        return String("Password is \"") + String(config.password) + "\"\n";
     }
+    return String("Password is too long. Maximum length is ") + String(sizeof(config.password) - 1) + ".\n";
 }
 
 /**
  * @brief The tz ui command handler. Called by the ui object as needed.
  * 
  */
-void onTz() {
-    String tz = ui.getWord(1);
+String onTz(CommandHandlerHelper* helper) {
+    String tz = helper->getWord(1);
     if (tz.length() == 0) {
-        Serial.printf("Timezone is \"%s\".\n", config.timeZone);
+        return "Timezone is \"" + String(config.timeZone) + "\".\n";
     } else if (tz.length() < sizeof(config.timeZone)) {
         strcpy(config.timeZone, tz.c_str());
-        Serial.printf("Timezone changed to \"%s\".\n", config.outletName);
-    } else {
-        Serial.printf("Time zone string too long; max length is %d.\n", sizeof(config.timeZone));
+        return String("Timezone changed to \"") + String(config.outletName) + "\".\n";
     }
+    return String("Time zone string too long; max length is ") + String(sizeof(config.timeZone)) + ".\n";
 }
 
 /**
  * @brief The name ui command handler. Called by the ui object as needed.
  * 
  */
-void onName() {
-    String name = ui.getCommandLine().substring(ui.getWord(0).length());
+String onName(CommandHandlerHelper* helper) {
+    String name = helper->getCommandLine().substring(helper->getWord(0).length());
     name.trim();
     unsigned int nameLen = name.length();
     if (nameLen != 0 && nameLen < sizeof(config.outletName)) {
         strcpy(config.outletName, name.c_str());
-        Serial.printf("Outlet name changed to \"%s\"\n", config.outletName);
+        return String("Outlet name changed to \"") + name + "\"\n";
     } else if (nameLen == 0) {
-        Serial.printf("Outlet name is \"%s\"\n", config.outletName);
-    } else {
-        Serial.printf("The specified outlet name is too long. Maximum length is %d\n", sizeof(config.outletName) - 1);
+        return String("Outlet name is \"") + String(config.timeZone) + "\"\n";
     }
+    return String("The specified outlet name is too long. Maximum length is ") + String(sizeof(config.outletName) - 1) + "\n";
 }
 
 /**
  * @brief The save ui command handler. Called by the ui object as needed.
  * 
  */
-void onSave() {
+String onSave(CommandHandlerHelper* helper) {
     config.signature = CONFIG_SIG;
-    saveConfig("Configuration saved.\n");
+    saveConfig();
+    return "Configuration saved.\n";
 }
 
 /**
  * @brief The restart ui command handler. Called by the ui object as needed.
  * 
  */
-void onRestart() {
-    Serial.print("Restarting.\n");
+String onRestart(CommandHandlerHelper* helper) {
     ESP.restart();
+    return "";      // The compiler doesn't know restart never returns
 }
 
 /**
  * @brief The status ui command handler. Called by the ui object as needed.
  * 
  */
-void onStatus(){
+String onStatus(CommandHandlerHelper* helper){
+    String answer = "";
     if (running) {
         time_t nowSecs = time(nullptr);
-        Serial.printf("The time is %s", ctime(&nowSecs));
-        Serial.printf(
-            "We're attached to WiFi SSID \"%s\".\n"
-            "There our local IP address is ", 
-            config.ssid);
-        Serial.println(WiFi.localIP());
+        answer +=   "The time is " + String(ctime(&nowSecs)) + 
+                    "We're attached to WiFi SSID \"" + String(config.ssid) + "\".\n" +
+                    "There our local IP address is " + WiFi.localIP().toString() + ".\n";
     }
-    Serial.printf(
-        "The web server is %srunning.\n"
-        "The outlet is %s.\n"
-        "The schedule is %s.\n",
-        running ? "" : "not ", 
-        digitalRead(RELAY) == RELAY_CLOSED ? "on" : "off", 
-        config.enabled ? "enabled" : "disabled");
+    answer +=   String("The web server is " + String(running ? "" : "not ") + "running.\n") +
+                "The outlet is " + String(digitalRead(RELAY) == RELAY_CLOSED ? "on" : "off") + ".\n"
+                "The schedule is " + String(config.enabled ? "enabled" : "disabled") + ".\n";
+    return answer;
 }
 
 /**
@@ -862,7 +988,6 @@ void setup() {
     button.begin();                     // Initialize the button.
 
     // Attach the ui command handlers
-    ui.attachDefaultCmdHandler(onUnrecognized);
     if (!(
         ui.attachCmdHandler("help", onHelp) &&
         ui.attachCmdHandler("h", onHelp) &&
@@ -877,7 +1002,10 @@ void setup() {
         Serial.print("Couldn't attach all the ui command handlers.\n");
     }
 
-    Serial.println(BANNER);             // Say hello.
+    Serial.println(BANNER);                 // Say hello.
+    screenContents = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n" + 
+                    String(BANNER) + "\n"
+                    "Type \"help\" for a list of commands.\n"; // Also in the web commandline page
 
     // See if we have our configuration data available
     EEPROM.begin(sizeof(eepromData_t));
@@ -949,6 +1077,7 @@ void loop() {
     // Deal with button long presses: reset and, because the button is down, enter "PGM from UART" mode.
     if (button.longPressed()) {
         Serial.print("Resetting for firmware update.\n");
+        setLEDto(LED_DARK);
         ESP.reset();
     }
 

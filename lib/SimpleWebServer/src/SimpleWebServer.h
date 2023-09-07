@@ -97,24 +97,26 @@ const char swsNormalResponseHeaders[] =     "HTTP/1.1 200 OK\r\n"
  *          example, a methodHandler can send this as the message
  * 
  */
-const char swsBadRequestResponseHeaders[] = "HTTP/1.1 400 Bad Request\r\n"
-                                            "Connection: close\r\n\r\n";
+const char swsBadRequestResponse[] = "HTTP/1.1 400 Bad Request\r\n"
+                                     "Connection: close\r\n\r\n"
+                                     "400 Bad Request\r\n\r\n";
 /**
  * @brief   Typical response to a request for something the handler doesn't have. A methodHandler 
  *          can just make this be the entire message it sends.
  * 
  */
-const char swsNotFoundResponseHeaders[] =   "HTTP/1.1 404 Not Found\r\n"
-                                            "Connection: close\r\n\r\n";
+const char swsNotFoundResponse[] =   "HTTP/1.1 404 Not Found\r\n"
+                                     "Connection: close\r\n\r\n"
+                                     "404 Not Found\r\n\r\n";
 
 /**
  * @brief   Typical response when either the server does not recognize the request method, or 
  *          lacks the ability to fulfill the request.
  * 
  */
-const char swsNotImplementedResponseHeaders[] = "HTTP/1.1 501 Not Implemented\r\n"
-                                                "Connection: close\r\n"
-                                                "\r\n";
+const char swsNotImplementedResponse[] = "HTTP/1.1 501 Not Implemented\r\n"
+                                                "Connection: close\r\n\r\n"
+                                                "501 Not Implemented\r\n\r\n";
 
 class SimpleWebServer {
     public:

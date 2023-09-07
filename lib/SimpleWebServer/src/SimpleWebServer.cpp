@@ -87,14 +87,14 @@ void SimpleWebServer::run() {
         #endif
 
         // Analyze the request
-        String reqMethod = getWord(clientMessageStartLine);       // The first word in the request is the HTTP method.
+        String reqMethod = getWord(clientMessageStartLine);         // The first word in the request is the HTTP method.
 
-        trPath = getWord(clientMessageStartLine, 1);              // The second word in the request is the "origin form" URI.
-        trQuery = "";                                       // From the URI, extract the query portion, if any.
+        trPath = getWord(clientMessageStartLine, 1);                // The second word in the request is the "origin form" URI.
+        trQuery = "";                                               // From the URI, extract the query portion, if any.
         int queryStart = trPath.indexOf("?");
         if (queryStart != -1) {
             trQuery = trPath.substring(queryStart + 1);
-            trPath = trPath.substring(0, queryStart);       // What remains is the path portion.
+            trPath = trPath.substring(0, queryStart);               // What remains is the path portion.
         }
         #ifdef SWS_DEBUG
         Serial.printf("The request method is %s. The resource path is \"%s\" and the query is \"%s\".\n", 
@@ -187,7 +187,7 @@ String SimpleWebServer::getHeader(String headerName) {
 }
 
 /**
- * gerFormDatum()
+ * getFormDatum()
  */
 String SimpleWebServer::getFormDatum(String datumName) {
     // If the message body doesn't contain the right kind of data we won't find what's asked for
@@ -214,6 +214,7 @@ String SimpleWebServer::getFormDatum(String datumName) {
         if (lookFor.equals(item.substring(0, lookFor.length()))) {
             item = item.substring(lookFor.length());
             // un-URLencode item
+            item.replace("+", " ");
             int pctIx = item.indexOf('%');
             while (pctIx != -1){
                 if (item.charAt(pctIx + 1) == '%') {
@@ -362,19 +363,19 @@ void SimpleWebServer::getClientMessage(WiFiClient* client) {
  * defaultGetAndHeadHandler()
  */
 void SimpleWebServer::defaultGetAndHeadHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
-    httpClient->print(swsNotFoundResponseHeaders);
+    httpClient->print(swsNotFoundResponse);
 }
 
 /**
  * defaultUnimplementedHandler()
  */
 void SimpleWebServer::defaultUnimplementedHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
-    httpClient->print(swsNotImplementedResponseHeaders);
+    httpClient->print(swsNotImplementedResponse);
 }
 
 /**
  * defaultBadHandler
  */
 void SimpleWebServer::defaultBadHandler(SimpleWebServer* server, WiFiClient* httpClient, String path, String query) {
-    httpClient->print(swsBadRequestResponseHeaders);
+    httpClient->print(swsBadRequestResponse);
 }
