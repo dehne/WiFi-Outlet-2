@@ -1,7 +1,7 @@
 /****
  * @file main.cpp
- * @version 1.1.1
- * @date August 31, 2023
+ * @version 1.2.0
+ * @date September 27, 2023
  * 
  * WiFi Outlet -- Replacement firmware for the 2017 Sharper Image model 70011 WiFi 
  * controlled outlet. 
@@ -9,18 +9,22 @@
  * About this project
  * ==================
  * 
- * This sketch presents the Sharper Image model 70011 WiFi controlled outlet as a one-page web 
- * site on the local WiFi network. The web page shows two types of schedule for turning the 
- * outlet on and off at specified times of day. One schedule provides up to three on-off cycles 
- * per day. The other has one on-off cycle for weekdays and another for weekend days. Using the 
- * page you can set the times and which schedule to use. The page also lets you turn the outlet 
- * on and off manually.
+ * This sketch presents the Sharper Image model 70011 WiFi controlled outlet as a two-page web 
+ * site on the local WiFi network. 
+ * 
+ * The home page shows two types of schedule for turning the outlet on and off at specified times 
+ * of day. One schedule provides up to three on-off cycles per day. The other has one on-off cycle 
+ * for weekdays and another for weekend days. Using the page you can set the times and which 
+ * schedule to use. The page also lets you turn the outlet on and off manually.
+ * 
+ * The other page, /commandline.html, shows a "dumb terminal" with the same command line 
+ * interface that's presented over the Serial interface. 
  * 
  * There's a button on the device. Clicking it toggles the outlet on or off.
  * 
  * The implementation uses -- in addition to all the ESP8266 WiFi stuff -- a super simple web 
  * server I wrote for the purpose. See SimpleWebServer.h for details. It also uses two other 
- * libraries I wrote for other projects, UserInput, which makes having a commandline 
+ * libraries I wrote for other projects, Commandline, which makes implementing a commandline 
  * interpreter easy to do, and PushButton, for simple clicky-button support. See them for more 
  * information.
  * 
@@ -1087,13 +1091,13 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             webServer.run();                    // Let the web server do its thing
             followSchedule();                   // Let the schedule follower do its thing
-            noWiFiMillis = 0;               // We do have an internet connection (perhaps reacquired)
+            noWiFiMillis = 0;                   // We do have an internet connection (perhaps reacquired)
 
         // Otherwise, the WiFi connection we had isn't there anymore. If this the first we saw that
         } else if (noWiFiMillis == 0) {
             Serial.printf("Oops! The WiFi connection seems to have disappeared. Will try to reconnect in %ld minutes.\n",
                 NOT_RUNNING_MINS);
-            noWiFiMillis = curMillis;       // Note when we first noticed there was no internet connection
+            noWiFiMillis = curMillis;           // Note when we first noticed there was no internet connection
         }
     }
     

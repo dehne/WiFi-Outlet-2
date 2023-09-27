@@ -5,8 +5,7 @@
  * 
  * This file is a portion of the package WebCmd, a library that provides an Arduino sketch 
  * with the ability to provide a simple command line UI on a web page. It is meant to work with 
- * the packages SimpleWebServer and Commandline to provide WiFi the web server and command line
- * infrastructure. See them for more details.
+ * the packages SimpleWebServer and Commandline. See them for more details.
  * 
  *****
  * 
