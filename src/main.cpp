@@ -1,7 +1,7 @@
 /****
  * @file main.cpp
- * @version 1.2.0
- * @date September 27, 2023
+ * @version 1.5.0
+ * @date September 28, 2023
  * 
  * WiFi Outlet -- Replacement firmware for the 2017 Sharper Image model 70011 WiFi 
  * controlled outlet. 
@@ -123,21 +123,20 @@
 #include <SimpleWebServer.h>                        // The web server library
 #include <WebCmd.h>                                 // The "friend" extension of CommandLine for SimpleWebServer
 
+//#define DEBUG                                       // Uncomment to enable debug code
+
 // Pin definitions
 #define LED             (13)                        // On the WiFi outlet PCB, this is active LOW
 #define BUTTON          (0)                         // Active LOW
 #define RELAY           (14)                        // On the WiFi outlet PCB, the relay that controls the outlet
 
 // Misc constants
-#define BANNER              "WiFi Switch V1.1.1"    // The tagline to identify this sketch
+#define BANNER              "WiFi Switch V1.5.0"    // The tagline to identify this sketch
 #define NTP_SERVER          "pool.ntp.org"          // The NTP server we use
 #define TOGGLE_QUERY        "outlet=toggle"         // The URI query string to cause the outlet to toggle state
 #define SCHED_UPDATE_QUERY  "schedule=update"       // The URI query string to cause the schedule parms to be updated
 #define SCHED_TOGGLE_QUERY  "schedule=toggle"       // The URI query string to cause the schedule enable/disable toggle
-#define DAILY_SCHED_VALUE   "daily"                 // The value of the <input type="radio" /> selecting the daily schedule
-#define WEEKLY_SCHED_VALUE  "weekly"                // The value of the <input type="radio" /> selecting the weekly schedule
 #define CMD_SCREEN_LINES    (30)                    // The number of lines of text in the commandline.html "screen"
-
 #define LED_LIT             (LOW)                   // digitalWrite value to light the LED
 #define LED_DARK            (HIGH)                  // digitalWrite value to turn the LED off
 #define RELAY_OPEN          (LOW)                   // digitlWrite value to open the relay
@@ -148,12 +147,17 @@
 #define WIFI_DELAY_MILLIS   (500)                   // millis() to delay between printing "." while waiting for WiFi and NTP
 #define WIFI_CONN_MILLIS    (15000)                 // millis() to wait for WiFi connect before giving up
 #define NTP_SET_MILLIS      (10000)                 // millis() to wait for NTP server to set the time
-#define NOT_RUNNING_MINS    (10UL)                  // minutes to wait before restarting if internet not available
+#define NOT_RUNNING_MINS    (5UL)                   // minutes to wait before restarting if internet not available
 #define NOT_RUNNING_MILLIS  (NOT_RUNNING_MINS * 60000) // same as NOT_RUNNING_MINS but in micros()
 #define DAWN_OF_HISTORY     (1533081600)            // Well, actually time_t for August 1st, 2018
-#define CONFIG_SIG          (0x3680)                // Our "signature" in EEPROM to know the data is (probably) ours
+#define MINS_PER_DAY        (1440)                  // Number of minutes in one day
+#define CONFIG_SIG          (0x3B80)                // Our "signature" in EEPROM to know the data is (probably) ours
 
 typedef unsigned int minPastMidnight_t;             // Minutes past midnight: 0 --> 1399
+enum cycleType_t : uint8_t {daily, weekDay, weekEnd, _cycleTypeSize};   // The cycle types we support
+#ifdef DEBUG
+String cycleTypeName[_cycleTypeSize] = {"daily", "weekday", "weekend"};
+#endif
 
 struct eepromData_t {
     uint16_t signature;                             // Random integer identifying the data as ours. Change when shape changes
@@ -161,15 +165,12 @@ struct eepromData_t {
     char password[64];                              // Password to use to connect to the WiFi
     char timeZone[32];                              // The POSIX timezone string for the timezone we use (see TZ.h)
     char outletName[32];                            // The name of the outlet
-    bool enabled;                                   // If true, the schedule is enabled; if false schedule is diabled
-    bool useWeekly;                                 // If true use the weekly schedule, if false, use the daily
-    bool dailyEnable[3];                            // Whether each of the three daily on/off periods is enabled
-    minPastMidnight_t dailyOnTime[3];               // The turn-on time for each of the three daily on/off periods
-    minPastMidnight_t dailyOffTime[3];              // The turn-off time for each of the three daily on/off periods
-    minPastMidnight_t weekdayOnTime;                // The turn-on time for weekdays
-    minPastMidnight_t weekdayOffTime;               // The turn-off time for weekdays
-    minPastMidnight_t weekendOnTime;                // The turn-on time for weekends
-    minPastMidnight_t weekendOffTime;               // The turn-off time for weekends
+    bool enabled;                                   // If true, the schedule is enabled; if false schedule is disabled
+    bool cycleEnable[3];                            // Whether each of the three on/off cycles is enabled
+    cycleType_t cycleType[3];                       // The type of each of the three on/off cycles
+    minPastMidnight_t cycleOnTime[3];               // The turn-on time for each of the three on/off cycles
+    minPastMidnight_t cycleOffTime[3];              // The turn-off time for each of the three on/off cycles
+    int cycleFuzz[3];                               // The number of minutes of randomness in each of the cycles
 };
 
 WiFiServer wiFiServer {80};                         // The WiFi server on port 80
@@ -179,25 +180,21 @@ CommandLine ui {};                                  // The command line interpre
 WebCmd wc {&ui};                                    // The web command extension
 String screenContents;                              // For the web command page, the screen contents
 
-// The configuration we'll use preset with default values
-//                   sig ssid pw  timezone                  outletName  enabled useWeekly --- dailyEnable --
-eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", "McOutlet", false,  false,    true, false, false, 
+// The configuration we'll use, preset with default values
+//                   sig ssid pw  ------- timezone -------  outletName  enabled --- cycleEnable ---
+eepromData_t config {0,  "",  "", "PST8PDT,M3.2.0,M11.1.0", "McOutlet", false,  false, false, false, 
+//                   ---- cycleType ----  -- cycleOnTime ---  -- cycleOffTime ----  - cycleFuzz -
+                     daily, daily, daily, 8*60, 13*60, 19*60, 12*60, 17*60 , 21*60, 0,    0,    0};
 
-//                   -- dailyOnTime ---  -- dailyOffTime ----
-                     8*60, 13*60, 19*60, 12*60, 17*60 , 21*60, 
-
-//                   wkDyOn wkDyOff wkEnOn wkEnOff
-                     7*60,  17*60,  18*60, 22*60};  // Default config
-
-// The field names in the web page's form. A POST request uses these to report form field values.
+// The field names in the home page's form. A POST request uses these to report form field values.
 enum formDataName_t : uint8_t 
-    {fdStype, fdDg0, fdDg1, fdDg2, fdDg0n, fdDg0f, fdDg1n, fdDg1f, fdDg2n, fdDg2f, fdWdn, fdWdf, fdWen, fdWef, _formDataNameSize_};
+    {fdS0en, fdS1en, fdS2en, fdS0ty, fdS1ty, fdS2ty, fdS0on, fdS1on, fdS2on, fdS0of, fdS1of, fdS2of, fdS0fz, fdS1fz, fdS2fz, _formDataNameSize_};
 String formDataNames[_formDataNameSize_] =
-    {"stype", "Dg0", "Dg1", "Dg2", "Dg0n", "Dg0f", "Dg1n", "Dg1f", "Dg2n", "Dg2f", "wdn", "wdf", "wen", "wef"};
+    {"s0en", "s1en", "s2en", "s0ty", "s1ty", "s2ty", "s0on", "s1on", "s2on", "s0of", "s1of", "s2of", "s0fz", "s1fz", "s2fz"};
 
-unsigned long noWiFiMillis;                         // millis() when we noticed the WiFi wasn't available; 0 otherwise
-bool running;                                       // True if we have a config, connect to WiFi and successfully set the time.
-bool scheduleUpdated;                               // True when schedule updated since last looked at by followSchedule()
+unsigned long noWiFiMillis = 0;                     // millis() when we noticed the WiFi wasn't available; 0 otherwise
+bool running = false;                               // True if we have a config, connect to WiFi and successfully set the time.
+bool scheduleUpdated = true;                        // True when schedule updated since last looked at by followSchedule()
 
 /**
  * @brief   Convert a string in the form "hh:mm", hh = 00..23, mm = 00..59 to minPastMidnight_t
@@ -277,6 +274,7 @@ bool setClock() {
  * @return false            Save failed
  */
 bool saveConfig(String successMessage = "") {
+    config.signature = CONFIG_SIG;
     EEPROM.put(0, config);
     if (EEPROM.commit()) {
         if (successMessage.length() != 0) {
@@ -405,96 +403,95 @@ void sendHomePage(WiFiClient* httpClient) {
                         "body {\n"
                         "background-color: black;\n"
                         "color: antiquewhite;\n"
-                        "font-family: \"Gill Sans\", \"Gill Sans MT\","
-                        " \"Myriad Pro\", \"DejaVu Sans Condensed\", Helvetica, Arial, \"sans-serif\";\n"
+                        "font-family: \"Gill Sans\", \"Gill Sans MT\", \"Myriad Pro\", \"DejaVu Sans Condensed\", Helvetica, Arial, \"sans-serif\";\n"
                         "}\n"
                         "h1 {\n"
                         "text-align: center;\n"
-                        "font-family: Cambria, \"Hoefler Text\", \"Liberation Serif\", Times,"
-                        " \"Times New Roman\", \"serif\";\n"
+                        "font-family: Cambria, \"Hoefler Text\", \"Liberation Serif\", Times, \"Times New Roman\", \"serif\";\n"
                         "}\n"
                         "td {\n"
                         "text-align: center;\n"
+                        "}\n"
+                        ".hdr {\n"
+                        "background-color: #3A3A3A;\n"
                         "}\n"
                         "</style>\n"
                         "</head>\n"
                         "<body>\n"
                         "<h1>WiFi Outlet &ldquo;@outletName&rdquo; Control Panel</h1>\n"
-                        "<p>Using this page you can set up and control your WiFi outlet. You can set up daily and weekly "
-                        "schedules, and switch between which to follow. You can also turn schedule-following on and off "
-                        "or just manually control the outlet.</p>\n"
+                        "<p>Using this page you can set up and control your WiFi outlet. You can schedule up to three on-off cycles. For each cycle, you can set it to happen every day, only on weekdays or only on weekend days. For each enabled cycle, the outlet will turn on at the &ldquo;From&rdquo; time and turn off at the &ldquo;to&rdquo; time. Setting the &ldquo;+/-&rdquo; value to something other than zero will make the on and off times vary randomly by up to the specified number of minutes. Once you have set up the schedule, click on the &ldquo;Save schedule&rdquo; button to save it in the outlet and put it into effect.</p>\n"
+                        "<p>Using the buttons, you can also turn schedule-following on and off and manually turn the outlet on and off.</p>\n"
                         "<form method=\"post\">\n"
                         "<h2>Schedule</h2>\n"
                         "<table width=\"80%\" border=\"0\" cellpadding=\"10\">\n"
                         "<tbody>\n"
                         "<tr>\n"
-                        "<td>\n"
-                        "<input type=\"radio\" id=\"daily\" name=\"stype\" value=\"" DAILY_SCHED_VALUE "\" @dailyChecked />\n"
-                        "<label for=\"daily\">daily</label>\n"
+                        "<td class=\"hdr\">\n"
+                        "<input type=\"checkbox\" name=\"s0en\" @s0en>\n"
+                        "<label for=\"s0en\">Enable</label>\n"
                         "</td>\n"
-                        "<td>\n"
-                        "<table width=\"100%\" border=\"0\">\n"
-                        "<tbody>\n"
-                        "<tr bgcolor=\"#3A3A3A\">\n"
-                        "<td colspan=\"2\">\n"
-                        "<input type=\"checkbox\" name=\"Dg0\" @dg0Checked />\n"
-                        "<label for=\"Dg0\">Enable</label>\n"
+                        "<td class=\"hdr\">\n"
+                        "<input type=\"checkbox\" name=\"s1en\" @s1en>\n"
+                        "<label for=\"s1en\">Enable</label>\n"
                         "</td>\n"
-                        "<td colspan=\"2\">\n"
-                        "<input type=\"checkbox\" name=\"Dg1\" @dg1Checked />\n"
-                        "<label for=\"Dg1\">Enable</label>\n"
-                        "</td>\n"
-                        "<td colspan=\"2\">\n"
-                        "<input type=\"checkbox\" name=\"Dg2\" @dg2Checked />\n"
-                        "<label for=\"Dg2\">Enable</label>\n"
-                        "</td>\n"
-                        "</tr>\n"
-                        "<tr bgcolor=\"#3A3A3A\">\n"
-                        "<td>Turn On at</td>\n"
-                        "<td>Turn Off at</td>\n"
-                        "<td>Turn On at</td>\n"
-                        "<td>Turn Off at</td>\n"
-                        "<td>Turn On at</td>\n"
-                        "<td>Turn Off at</td>\n"
-                        "</tr>\n"
-                        "<tr>\n"
-                        "<td><input type=\"time\" name=\"Dg0n\" value=\"@dg0n\" ></td>\n"
-                        "<td><input type=\"time\" name=\"Dg0f\" value=\"@dg0f\"></td>\n"
-                        "<td><input type=\"time\" name=\"Dg1n\" value=\"@dg1n\"></td>\n"
-                        "<td><input type=\"time\" name=\"Dg1f\" value=\"@dg1f\"></td>\n"
-                        "<td><input type=\"time\" name=\"Dg2n\" value=\"@dg2n\"></td>\n"
-                        "<td><input type=\"time\" name=\"Dg2f\" value=\"@dg2f\"></td>\n"
-                        "</tr>\n"
-                        "</tbody>\n"
-                        "</table>\n"
+                        "<td class=\"hdr\">\n"
+                        "<input type=\"checkbox\" name=\"s2en\" @s2en>\n"
+                        "<label for=\"s2en\">Enable</label>\n"
                         "</td>\n"
                         "</tr>\n"
                         "<tr>\n"
                         "<td>\n"
-                        "<input type=\"radio\" id=\"weekly\" name=\"stype\" value=\"" WEEKLY_SCHED_VALUE "\" @weeklyChecked />\n"
-                        "<label for=\"weekly\">weelky</label>\n"
+                        "<input type=\"radio\" name=\"s0ty\" value=\"s0dy\" @s0dy>\n"
+                        "<label for=\"s0dy\">Daily</label><br/>\n"
+                        "<input type=\"radio\" name=\"s0ty\" value=\"s0wd\" @s0wd>\n"
+                        "<label for=\"s0wd\">Weekday</label>   \n"
+                        "<input type=\"radio\" name=\"s0ty\" value=\"s0we\" @s0we>\n"
+                        "<label for=\"s0we\">Weekend</label>\n"
                         "</td>\n"
                         "<td>\n"
-                        "<table width=\"100%\" border=\"0\">\n"
-                        "<tbody>\n"
-                        "<tr bgcolor=\"#3A3A3A\">\n"
-                        "<td colspan=\"2\">Weekday</td>\n"
-                        "<td colspan=\"2\">Weekend</td>\n"
-                        "</tr>\n"
-                        "<tr bgcolor=\"#3A3A3A\">\n"
-                        "<td>Turn On at</td>\n"
-                        "<td>Turn Off at</td>\n"
-                        "<td>Turn On at</td>\n"
-                        "<td>Turn Off at</td>\n"
+                        "<input type=\"radio\" name=\"s1ty\" value=\"s1dy\" @s1dy>\n"
+                        "<label for=\"s1dy\">Daily</label><br/>\n"
+                        "<input type=\"radio\" name=\"s1ty\" value=\"s1wd\" @s1wd>\n"
+                        "<label for=\"s1wd\">Weekday</label>\n"
+                        "<input type=\"radio\" name=\"s1ty\" value=\"s1we\" @s1we>\n"
+                        "<label for=\"s1we\">Weekend</label>\n"
+                        "</td>\n"
+                        "<td>\n"
+                        "<input type=\"radio\" name=\"s2ty\" value=\"s2dy\" @s2dy>\n"
+                        "<label for=\"s2dy\">Daily</label><br/>\n"
+                        "<input type=\"radio\" name=\"s2ty\" value=\"s2wd\" @s2wd>\n"
+                        "<label for=\"s2wd\">Weekday</label>\n"
+                        "<input type=\"radio\" name=\"s2ty\" value=\"s2we\" @s2we>\n"
+                        "<label for=\"s2we\">Weekend</label>\n"
+                        "</td>\n"
                         "</tr>\n"
                         "<tr>\n"
-                        "<td><input type=\"time\" name=\"wdn\" value=\"@wdn\"></td>\n"
-                        "<td><input type=\"time\" name=\"wdf\" value=\"@wdf\"></td>\n"
-                        "<td><input type=\"time\" name=\"wen\" value=\"@wen\"></td>\n"
-                        "<td><input type=\"time\" name=\"wef\" value=\"@wef\"></td>\n"
-                        "</tr>\n"
-                        "</tbody>\n"
-                        "</table>\n"
+                        "<td>\n"
+                        "From\n"
+                        "<input type=\"time\" name=\"s0on\" value=\"@s0on\">\n"
+                        "to\n"
+                        "<input type=\"time\" name=\"s0of\" value=\"@s0of\"><br/>\n"
+                        "+/-\n"
+                        "<input type=\"number\" name=\"s0fz\" value=\"@s0fz\">\n"
+                        "min\n"
+                        "</td>\n"
+                        "<td>\n"
+                        "From\n"
+                        "<input type=\"time\" name=\"s1on\" value=\"@s1on\">\n"
+                        "to\n"
+                        "<input type=\"time\" name=\"s1of\" value=\"@s1of\"><br/>\n"
+                        "+/-\n"
+                        "<input type=\"number\" name=\"s1fz\" value=\"@s1fz\">\n"
+                        "min\n"
+                        "</td>\n"
+                        "<td>\n"
+                        "From\n"
+                        "<input type=\"time\" name=\"s2on\" value=\"@s2on\">\n"
+                        "to\n"
+                        "<input type=\"time\" name=\"s2of\" value=\"@s2of\"><br/>\n"
+                        "+/-\n"
+                        "<input type=\"number\" name=\"s2fz\" value=\"@s2fz\">\n"
+                        "min\n"
                         "</td>\n"
                         "</tr>\n"
                         "</tbody>\n"
@@ -507,28 +504,34 @@ void sendHomePage(WiFiClient* httpClient) {
                         "<input type=\"submit\" value=\"Turn outlet @outletWillBe\" formaction=\"/index.html?" TOGGLE_QUERY "\" />\n"
                         "</form>\n"
                         "<p>&nbsp;</p>\n"
-                        "<p style=\"font-size: 80%\">@outletBanner Copyright &copy; 2023 by D. L. Ehnebuske.</p>\n"
+                        "<p style=\"font-size: 80%\" >@outletBanner Copyright &copy; 2023 by D. L. Ehnebuske.</p>\n"
                         "</body>\n"
                         "</html>\r\n"
                         "\r\n";
 
     // Substitute all the variable information needed in the HTLM. Each variable in the text is a name beginning with "@"
     pageHtml.replace("@outletName", config.outletName);
-    pageHtml.replace("@dailyChecked", config.useWeekly ? "" : "checked");
-    pageHtml.replace("@dg0Checked", config.dailyEnable[0] ? "checked" : "");
-    pageHtml.replace("@dg0n", fromMinsPastMidnight(config.dailyOnTime[0]));
-    pageHtml.replace("@dg0f", fromMinsPastMidnight(config.dailyOffTime[0]));
-    pageHtml.replace("@dg1Checked", config.dailyEnable[1] ? "checked" : "");
-    pageHtml.replace("@dg1n", fromMinsPastMidnight(config.dailyOnTime[1]));
-    pageHtml.replace("@dg1f", fromMinsPastMidnight(config.dailyOffTime[1]));
-    pageHtml.replace("@dg2Checked", config.dailyEnable[2] ? "checked" : "");
-    pageHtml.replace("@dg2n", fromMinsPastMidnight(config.dailyOnTime[2]));
-    pageHtml.replace("@dg2f", fromMinsPastMidnight(config.dailyOffTime[2]));
-    pageHtml.replace("@weeklyChecked", config.useWeekly ? "checked" : "");
-    pageHtml.replace("@wdn", fromMinsPastMidnight(config.weekdayOnTime));
-    pageHtml.replace("@wdf", fromMinsPastMidnight(config.weekdayOffTime));
-    pageHtml.replace("@wen", fromMinsPastMidnight(config.weekendOnTime));
-    pageHtml.replace("@wef", fromMinsPastMidnight(config.weekendOffTime));
+    pageHtml.replace("@s0en", config.cycleEnable[0] ? "checked" : "");
+    pageHtml.replace("@s1en", config.cycleEnable[1] ? "checked" : "");
+    pageHtml.replace("@s2en", config.cycleEnable[2] ? "checked" : "");
+    pageHtml.replace("@s0dy", config.cycleType[0] == daily ? "checked" : "");
+    pageHtml.replace("@s0wd", config.cycleType[0] == weekDay ? "checked" : "");
+    pageHtml.replace("@s0we", config.cycleType[0] == weekEnd ? "checked" : "");
+    pageHtml.replace("@s1dy", config.cycleType[1] == daily ? "checked" : "");
+    pageHtml.replace("@s1wd", config.cycleType[1] == weekDay ? "checked" : "");
+    pageHtml.replace("@s1we", config.cycleType[1] == weekEnd ? "checked" : "");
+    pageHtml.replace("@s2dy", config.cycleType[2] == daily ? "checked" : "");
+    pageHtml.replace("@s2wd", config.cycleType[2] == weekDay ? "checked" : "");
+    pageHtml.replace("@s2we", config.cycleType[0] == weekEnd ? "checked" : "");
+    pageHtml.replace("@s0on", fromMinsPastMidnight(config.cycleOnTime[0]));
+    pageHtml.replace("@s0of", fromMinsPastMidnight(config.cycleOffTime[0]));
+    pageHtml.replace("@s1on", fromMinsPastMidnight(config.cycleOnTime[1]));
+    pageHtml.replace("@s1of", fromMinsPastMidnight(config.cycleOffTime[1]));
+    pageHtml.replace("@s2on", fromMinsPastMidnight(config.cycleOnTime[2]));
+    pageHtml.replace("@s2of", fromMinsPastMidnight(config.cycleOffTime[2]));
+    pageHtml.replace("@s0fz", String(config.cycleFuzz[0]));
+    pageHtml.replace("@s1fz", String(config.cycleFuzz[1]));
+    pageHtml.replace("@s2fz", String(config.cycleFuzz[2]));
     pageHtml.replace("@schedIs", config.enabled ? "enabled" : "disabled");
     pageHtml.replace("@schedWillBe", config.enabled ? "disable" : "enable");
     pageHtml.replace("@schEnButton", config.enabled ? "Disable" : "Enable");
@@ -618,56 +621,60 @@ void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPat
         // Deal with SCHED_UPDATE_QUERY -- store the state of the schedule in EEPROM
         } else if (trQuery.equalsIgnoreCase(SCHED_UPDATE_QUERY)) {
             #ifdef DEBUG
-            Serial.printf("[handlePost] Update schedule. Message headers: \"%s\"\n", webServer->clientHeaders().c_str());
-            Serial.printf("[handlePost] The message body is \"%s\"\n", webServer->clientBody().c_str());
-            ui.cancelCmd(); // Reissue command prompt after the print
+            Serial.printf("[handlePost] Update schedule. Message headers: \"%s\"\nForm data: ", webServer->clientHeaders().c_str());
             #endif
-            config.dailyEnable[0] = config.dailyEnable[1] = config.dailyEnable[2] = false; // N.B. Only sent in POST data when true
+            config.cycleEnable[0] = config.cycleEnable[1] = config.cycleEnable[2] = false; // N.B. Only sent in POST data when "on"
             for (uint8_t i = 0; i < _formDataNameSize_; i++) {
                 String formValue = webServer->getFormDatum(formDataNames[i]);
                 if (formValue.length() != 0) {
+                    #ifdef DEBUG
+                    Serial.printf("%s = \"%s\" ", formDataNames[i].c_str(), formValue.c_str());
+                    #endif
                     switch ((formDataName_t)i) {
-                        case fdStype:
-                            config.useWeekly = formValue.equals(WEEKLY_SCHED_VALUE);
+                        case fdS0en:
+                            config.cycleEnable[0] = formValue == "on" ? true : false;
                             break;
-                        case fdDg0:
-                            config.dailyEnable[0] = formValue == "on" ? true : false;
+                        case fdS1en:
+                            config.cycleEnable[1] = formValue == "on" ? true : false;
                             break;
-                        case fdDg1:
-                            config.dailyEnable[1] = formValue == "on" ? true : false;
+                        case fdS2en:
+                            config.cycleEnable[2] = formValue == "on" ? true : false;
                             break;
-                        case fdDg2:
-                            config.dailyEnable[2] = formValue == "on" ? true : false;
+                        case fdS0ty:
+                            config.cycleType[0] = formValue == "s0dy" ? daily : formValue == "s0wd" ? weekDay : weekEnd;
                             break;
-                        case fdDg0n:
-                            config.dailyOnTime[0] = toMinsPastMidnight(formValue);
+                        case fdS1ty:
+                            config.cycleType[1] = formValue == "s1dy" ? daily : formValue == "s1wd" ? weekDay : weekEnd;
                             break;
-                        case fdDg0f:
-                            config.dailyOffTime[0] = toMinsPastMidnight(formValue);
+                        case fdS2ty:
+                            config.cycleType[2] = formValue == "s2dy" ? daily : formValue == "s2wd" ? weekDay : weekEnd;
                             break;
-                        case fdDg1n:
-                            config.dailyOnTime[1] = toMinsPastMidnight(formValue);
+                        case fdS0on:
+                            config.cycleOnTime[0] = toMinsPastMidnight(formValue);
                             break;
-                        case fdDg1f:
-                            config.dailyOffTime[1] = toMinsPastMidnight(formValue);
+                        case fdS1on:
+                            config.cycleOnTime[1] = toMinsPastMidnight(formValue);
                             break;
-                        case fdDg2n:
-                            config.dailyOnTime[2] = toMinsPastMidnight(formValue);
+                        case fdS2on:
+                            config.cycleOnTime[2] = toMinsPastMidnight(formValue);
                             break;
-                        case fdDg2f:
-                            config.dailyOffTime[2] = toMinsPastMidnight(formValue);
+                        case fdS0of:
+                            config.cycleOffTime[0] = toMinsPastMidnight(formValue);
                             break;
-                        case fdWdn:
-                            config.weekdayOnTime = toMinsPastMidnight(formValue);
+                        case fdS1of:
+                            config.cycleOffTime[1] = toMinsPastMidnight(formValue);
                             break;
-                        case fdWdf:
-                            config.weekdayOffTime = toMinsPastMidnight(formValue);
+                        case fdS2of:
+                            config.cycleOffTime[2] = toMinsPastMidnight(formValue);
                             break;
-                        case fdWen:
-                            config.weekendOnTime = toMinsPastMidnight(formValue);
+                        case fdS0fz:
+                            config.cycleFuzz[0] = formValue.toInt();
                             break;
-                        case fdWef:
-                            config.weekendOffTime = toMinsPastMidnight(formValue);
+                        case fdS1fz:
+                            config.cycleFuzz[1] = formValue.toInt();
+                            break;
+                        case fdS2fz:
+                            config.cycleFuzz[2] = formValue.toInt();
                             break;
                         default:
                             break;
@@ -676,7 +683,9 @@ void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPat
             }
             // Save the new data in config to EEPROM
             #ifdef DEBUG
+            Serial.print("\n");
             saveConfig("[handlePost] Configuration update saved.\n");
+            ui.cancelCmd();
             #else
             saveConfig();
             #endif
@@ -764,6 +773,9 @@ void handlePost(SimpleWebServer* webServer, WiFiClient* httpClient, String trPat
  */
 void followSchedule() {
     static minPastMidnight_t lastMinPastMidnight = 0;       // When we last noticed the time change.
+    // config.cycleOn and config.cycleOff times adjusted by cycleFuzz
+    static minPastMidnight_t cycleOn[sizeof(config.cycleEnable) / sizeof(config.cycleEnable[0])];
+    static minPastMidnight_t cycleOff[sizeof(config.cycleEnable) / sizeof(config.cycleEnable[0])];
     time_t curTime = time(nullptr);
     struct tm *timeval;
     timeval = localtime(&curTime);
@@ -772,6 +784,14 @@ void followSchedule() {
     // If the schedule is turned off, or the time hasn't changed and there's no new schedule, nothing to do
     if (!config.enabled || (curMinPastMidnight == lastMinPastMidnight && !scheduleUpdated)) {
         return;
+    }
+
+    // Handle an updated schedule by using the configured on/off times, initially with no cycleFuzz
+    if (scheduleUpdated) {
+        for (uint8_t c = 0; c < sizeof(config.cycleEnable) / sizeof(config.cycleEnable[0]); c++){
+            cycleOn[c] = config.cycleOnTime[c];
+            cycleOff[c] = config.cycleOffTime[c];
+        }
     }
 
     #ifdef DEBUG
@@ -786,70 +806,77 @@ void followSchedule() {
     scheduleUpdated = false;
     #endif
 
-    if (config.useWeekly) {
-        // Deal with weekly schedule. First, is it a weekday or weekend
-        bool isWeekday = (timeval->tm_wday >= 1 && timeval->tm_wday <= 5);
-
+    bool isWeekday = (timeval->tm_wday >= 1 && timeval->tm_wday <= 5);
+    // Handle each of the on/off cycles
+    for (uint8_t c = 0; c < sizeof(config.cycleEnable) / sizeof(config.cycleEnable[0]); c++){
         #ifdef DEBUG
-        Serial.printf("[followSchedule] A weekly schedule on a %s.\n", isWeekday ? "weekday" : "weekend day");
+        Serial.printf("[followSchedule] Cycle %d is %s.\n", c, config.cycleEnable[c] ? "enabled" : "disabled");
         #endif
+        // If cycle c is enabled and applicable today
+        if (config.cycleEnable[c] && 
+            (config.cycleType[c] == daily || 
+            (config.cycleType[c] == weekDay && isWeekday) || 
+            (config.cycleType[c] == weekEnd && !isWeekday))) {
 
-        if (isWeekday) {
-            // Deal with weekday in a weekly schedule
-
-            #ifdef DEBUG
-            Serial.printf("  Looking for on time of %s and an off time of %s.\n", 
-                fromMinsPastMidnight(config.weekdayOnTime).c_str(), fromMinsPastMidnight(config.weekdayOffTime).c_str());
-            #endif
-
-            if (config.weekdayOffTime == curMinPastMidnight) {
-                setOutletTo(OUTLET_OFF);
+            // If it's midnight and the fuzzy cycleOn[c] time was suspended, put it into effect now
+            if (curMinPastMidnight == 0 && cycleOn[c] >= MINS_PER_DAY) {
+                cycleOn[c] -= MINS_PER_DAY;
             }
-            if (config.weekdayOnTime == curMinPastMidnight) {
+            // If it's time for this cycleOn to go into effect, turn the outlet on and, if needed, calculate a new cycleOn
+            if (cycleOn[c] == curMinPastMidnight) {
                 setOutletTo(OUTLET_ON);
+                // If the cycleOn is fuzzy, figure out what the new on time should be
+                if (config.cycleFuzz[c] != 0) {
+                    // If switch off comes later in the day, the new on time is config on time +/- a random amount <= the fuzz.
+                    if (config.cycleOnTime[c] < config.cycleOffTime[c]) {
+                        int randMax = config.cycleFuzz[c] >= 0 ? config.cycleFuzz[c] : -config.cycleFuzz[c];
+                        cycleOn[c] = (config.cycleOnTime[c] + random(2 * randMax) - randMax + MINS_PER_DAY) % MINS_PER_DAY;
+                        // If we'd run into the new time later today, suspend the new value until midnight
+                        if (cycleOn[c] > curMinPastMidnight) {
+                            cycleOn[c] += MINS_PER_DAY;
+                        }
+                    // Otherwise, the the new on time is the config on time + whatever fuzz the off time is using
+                    } else {
+                        cycleOn[c] = config.cycleOnTime[c] + cycleOff[c] - config.cycleOffTime[c];
+                    }
+                    #ifdef DEBUG
+                    Serial.printf("[followSchedule] New on time for cycle %d: %s%s.\n", 
+                      c, fromMinsPastMidnight(cycleOn[c] % MINS_PER_DAY).c_str(), cycleOn[c] >= MINS_PER_DAY ? " (suspended)" : "");
+                    #endif
+                }
             }
-        } else {
-            // Deal with weekend day in a weekly schedule
 
-            #ifdef DEBUG
-            Serial.printf("  Looking for on time of %s and an off time of %s.\n", 
-                fromMinsPastMidnight(config.weekendOnTime).c_str(), fromMinsPastMidnight(config.weekendOffTime).c_str());
-            #endif
+            // If it's midnight and the fuzzy cycleOff[c] time was suspended, put it into effect now
+            if (curMinPastMidnight == 0 && cycleOff[c] >= MINS_PER_DAY) {
+                cycleOff[c] -= MINS_PER_DAY;
+            }
 
-            if (config.weekendOffTime == curMinPastMidnight) {
+            // If it's time for this cycleOoff to go into effect, turn the outlet off and calculate a new, fuzzy cycleOff
+            if (cycleOff[c] == curMinPastMidnight) {
                 setOutletTo(OUTLET_OFF);
-            }
-            if (config.weekendOnTime == curMinPastMidnight) {
-                setOutletTo(OUTLET_ON);
-            }
-        }
-    } else {
-        #ifdef DEBUG
-        Serial.print("[followSchedule] Following a daily schedule.\n");
-        #endif
-        // Deal with daily schedule
-
-        for (uint8_t group = 0; group < sizeof(config.dailyEnable); group++) {
-            if (config.dailyEnable[group]) {
-
-                #ifdef DEBUG
-                Serial.printf("  Group %d is enabled. Checking for an on time of %s and an off time of %s.\n",
-                    group, fromMinsPastMidnight(config.dailyOnTime[group]).c_str(), fromMinsPastMidnight(config.dailyOffTime[group]).c_str());
-                #endif
-
-                if (config.dailyOffTime[group] == curMinPastMidnight) {
-                    setOutletTo(OUTLET_OFF);
+                // If the cycleOff is fuzzy, figure out what the new off time should be
+                if( config.cycleFuzz[c] != 0) {
+                    // if the off time follows the on time, use the same fuzz the the on time figured out
+                    if (config.cycleOnTime[c] < config.cycleOffTime[c]) {
+                        cycleOff[c] = config.cycleOffTime[c] + cycleOn[c] - config.cycleOnTime[c];
+                    // Otherwise use the configured off time +/- a random amount <= the fuzz.
+                    } else {
+                        int randMax = config.cycleFuzz[c] >= 0 ? config.cycleFuzz[c] : -config.cycleFuzz[c];
+                        cycleOff[c] = (config.cycleOffTime[c] + random(2 * randMax) - randMax + MINS_PER_DAY) % MINS_PER_DAY;
+                        // If we'd run into the new time later today, suspend the new value until midnight
+                        if (cycleOff[c] > curMinPastMidnight) {
+                            cycleOff[c] += MINS_PER_DAY;
+                        }
+                    }
+                    #ifdef DEBUG
+                    Serial.printf("[followSchedule] New off time for cycle %d: %s%s.\n", 
+                      c, fromMinsPastMidnight(cycleOff[c] % MINS_PER_DAY).c_str(), cycleOff[c] >= MINS_PER_DAY ? " (suspended)" : "");
+                    #endif
                 }
-                if (config.dailyOnTime[group] == curMinPastMidnight) {
-                    setOutletTo(OUTLET_ON);
-                }
-            #ifdef DEBUG
-            } else {
-                Serial.printf("  Group %d is disabled.\n", group);
-            #endif
             }
         }
     }
+
     lastMinPastMidnight = curMinPastMidnight;               // We handled things for the current time
     #ifdef DEBUG
     ui.cancelCmd();
@@ -1014,11 +1041,19 @@ void setup() {
     // See if we have our configuration data available
     EEPROM.begin(sizeof(eepromData_t));
     // If so try to get it from EEPROM.
+    eepromData_t storedConfig;
     if (EEPROM.percentUsed() != -1) {
-        EEPROM.get(0,config);
+        EEPROM.get(0,storedConfig);
     }
-    // If the configuration signature is what we expect and there's an SSID and password, presume we'll get up and going
-    running = config.signature == CONFIG_SIG && config.ssid[0] != '\0' && config.password[0] != '\0';
+    #ifdef DEBUG
+    Serial.printf("Got stored data. signature: 0x%x, ssid: %s.\n", storedConfig.signature, storedConfig.ssid);
+    #endif
+    // If the stored signature matches, assume the stored data is our config
+    if (storedConfig.signature == CONFIG_SIG) {
+        config = storedConfig;
+    }
+    // If there's an SSID and password, presume we'll get up and going
+    running = config.ssid[0] != '\0' && config.password[0] != '\0';
     noWiFiMillis = 0;
     if (running) {
         // Get the WiFi connection going.
@@ -1051,6 +1086,8 @@ void setup() {
             Serial.printf("Expected to connect to WiFi and set the time, but couldn't. Will try again in %ld minutes.\n", 
                 NOT_RUNNING_MINS);
             noWiFiMillis = millis();
+        } else {
+            randomSeed((unsigned long)(time(nullptr) && 0xFFFFFFFF));
         }
     } else {
         Serial.print("No stored WiFi credentials found.\n");

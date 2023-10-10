@@ -7,15 +7,26 @@
 This sketch presents the Sharper Image model 70011 WiFi controlled outlet as a two-page web site 
 on the local WiFi network. 
 
-The home page shows two types of schedule for turning the outlet on and off at specified times 
-of day. One schedule provides up to three on-off cycles per day. The other has one on-off cycle 
-for weekdays and another for weekend days. Using the page you can set the times and which 
-schedule to use. The page also lets you turn the outlet on and off manually.
+![Photo of the device](./doc/Front.jpg "Pristine WiFi outlet")
 
-The other page, /commandline.html, shows a "dumb terminal" with the same command line 
-interface that's presented over the Serial interface. 
+The home page shows the schedule for turning the outlet on and off. 
 
-![Photo of the device](./doc/TheOutlet.jpg "Hacked WiFi Outlet")
+![Screenshot of home page](./doc/HomePage.jpg "Home page")
+
+As you can see, it provides for three on-off cycles, each of which can be enabled or disabled. A 
+cycle can be set to apply on a daily basis, only on weekdays or only on weekends. Using the page 
+you can set the on and off times for each cycle. You can also specify that each cycle's on and 
+off times should be adjusted by a random amount of time to make the schedule be less "mechanical." 
+
+The page also lets you turn the outlet on and off manually and enable or disable the schedule as a 
+whole.
+
+Here's the other page, /commandline.html:
+
+![Screenshot of command line page](./doc/Commandline.jpg "The commandline page")
+
+It shows a "dumb terminal" with the same command line interface that's presented over the Serial 
+interface. 
 
 There's a button on the device. Clicking it toggles the outlet on or off.
 
@@ -29,19 +40,20 @@ information.
 
 * The TYWE3S daughterboard in this device contains an ESP8266 microprocessor, SPI flash and 
   some other stuff I haven't looked at. It exposes some of the ESP8266's pins. Enough to
-  let us hack the device. The TYWE3S pin layout is as follows:
+  let us hack the device. Looking down on it from above, the TYWE3S pin layout is as follows: 
 
 ```
             <Antenna>
-         Gnd         Vcc
-      GPIO15         GPIO13
-       GPIO2         GPIO12
-       GPIO0         GPIO14
-       GPIO4         GPIO16
-       GPIO5         EN
-        RXD0         ADC
-        TXD0         RST
+         RST         TXD0
+         ADC         RXD0
+          EN         GPIO5
+      GPIO16         GPIO4
+      GPIO14         GPIO0
+      GPIO12         GPIO2
+      GPIO13         GPIO15
+         Vcc         Gnd
 ```
+![Photo of opened device](./doc/Insides.jpg "The insides of the device")
 
 * GPIO0 is connected to one side of the button on the device. The other side is connected to 
   Gnd. So, "active LOW."
@@ -54,38 +66,37 @@ information.
 
 * The other GPIOs and ADC aren't hooked to anything, so far as I know.
 
-* To hack the device, you'll need to solder wires to Gnd, Vcc, RXD0, TXD0 and, for convenience, 
-  to GPIO0 and RST. Connect all but the last two of these to an FTDI serial-to-USB device via 
-  female Dupont connectors (Gnd --> GND, Vcc --> 3V3, RXD0 --> TXD, and TXD0 --> RXD) and a 
-  5-pin connector shell. Put a female connector and shell on the GPIO0 wire and a male one on 
-  the wire from RST. Find a place on the board connected to Gnd and solder a piece of wire to 
-  act as a header pin there. (The pads for the unoccupied R24 and R28 nearest the electrolytic 
-  capacitor worked for me.) Hot-glue the wires to the side of the relay for strain relief.
+* To hack the device, you'll need to solder wires to Gnd, Vcc, RXD0, TXD0. Connect these to an 
+  FTDI serial-to-USB device via female Dupont connectors (Gnd --> GND, Vcc --> 3V3, RXD0 --> TXD, 
+  and TXD0 --> RXD) and a 5-pin connector shell. Hot-glue the wires to the side of the relay for 
+  strain relief. If you keep the wire lengths for the above to about 10cm you can coil them up 
+  inside the device when you reassemble it.
 
-* If you keep the wire lengths for the above to about 10cm you can coil them up inside the 
-  device when you reassemble it. (When reassembling, cover up the exposed male connector on the 
-  RST wire, or remove it and the GPIO0 wire; you won't need them once the device is put back 
-  together.)
+![Photo of PCB with FTDI wires](./doc/FTDIWires.jpg "With wires")
 
 * There's even room on the case between the outlet and the button for a rectangular hole to 
   mount and expose the 5-pin Dupont connector. That will let you reprogram the thing with it 
   all put back together.
 
-* To put the ESP8266 into "PGM from UART" mode, making it ready to accept a firmware update, 
-  GPIO00 needs to be connected to Gnd when the ESP8266 is reset or powered up. That can be 
-  done by attaching the wire from GPIO0 to the new header pin. Leaving GPIO0 floating at 
-  power-on or reset results in the ESP8266 entering "Boot from SPI Flash mode." I.e., running 
-  normally. 
+* To install new firmware in the ESP8266, disconnect the device from mains power, plug the FTDI 
+  dongle into a USB cable, hold down the button on the device and, with the button held down, 
+  plug the cable into your computer. This powers the ESP8266 up with GPIO0 grounded, putting it 
+  into "PGM from UART" mode. You can then use whatever firmware updating process you usually use 
+  for an ESP8266. I use VS Code and Platformio.
+  
+* When the device's button is up at power-up, GPIO0 is left floating, which results in the ESP8266 
+  entering "Boot from SPI Flash mode." I.e., running normally. 
 
 * When the ESP8266 is "soft reset" in "PGM from UART" mode, which is what happens after 
   Platformio loads new firmware into it, the processor will go into "Boot from SPI Flash" mode, 
   even with GPIO0 attached to Gnd. 
 
-* When the ESP8266 is reset using the ESP.reset() function, it DOES pay attention to GPIO0 and 
-  will enter "PGM from UART" mode if GPIO0 is attached to Gnd. 
+* Just for the record, when the ESP8266 is reset using the ESP.reset() function, it is supposed to 
+  pay attention to GPIO0 and will (usually) enter "PGM from UART" mode if GPIO0 is attached to 
+  Gnd. The firmware executes ESP.reset() when you give it a "reset" command through the 
+  commandline interface. 
 
-* To hardware reset the ESP8266, momentarily connect the wire from RST to Gnd or hold down the 
-  push-button on the case while you connect to the FTDI device. 
+![Photo of completed hack](./doc/TheOutlet.jpg "The completed hack")
 
 ### Copyright and License
 
